@@ -1,5 +1,5 @@
-# VPN: everything RaveBSD sends out (searches, downloads, DNS) leaves through Mullvad, via Gluetun.
-# If the tunnel drops, Gluetun's firewall blocks RaveBSD's traffic instead of letting it out unprotected.
+# VPN: everything RaveBSD and qBittorrent send out (searches, downloads, torrents, DNS) leaves through Mullvad, via Gluetun.
+# If the tunnel drops, Gluetun's firewall blocks their traffic instead of letting it out unprotected.
 # Secrets live in .env (WIREGUARD_PRIVATE_KEY, WIREGUARD_ADDRESSES, GLUETUN_API_KEY), never in this file.
 services:
   gluetun:
@@ -17,9 +17,10 @@ services:
       # RaveBSD reads the tunnel's state from Gluetun's control server (admin panel, VPN tunnel).
       HTTP_CONTROL_SERVER_AUTH_DEFAULT_ROLE: '{"auth":"apikey","apikey":"${GLUETUN_API_KEY:?set GLUETUN_API_KEY in .env}"}'
       TZ: Europe/Oslo
-    # RaveBSD's page is reached through Gluetun now, still only on this machine.
+    # Both web pages are reached through Gluetun, only on this machine.
     ports:
       - "${PORT:-8080}:8080"
+      - "127.0.0.1:8081:8081"
     restart: unless-stopped
 
   ravebsd:
@@ -29,3 +30,21 @@ services:
       gluetun:
         condition: service_started
         restart: true
+
+  # Torrents for RaveBSD. It shares Gluetun's network with RaveBSD, so RaveBSD reaches it at http://localhost:8081.
+  qbittorrent:
+    image: lscr.io/linuxserver/qbittorrent:latest
+    network_mode: "service:gluetun"
+    environment:
+      PUID: ${PUID:-1000}
+      PGID: ${PGID:-1000}
+      TZ: Europe/Oslo
+      WEBUI_PORT: 8081
+    volumes:
+      - ./qbittorrent:/config:z
+      - ${DOWNLOADS_PATH:-./downloads}:/downloads:z
+    depends_on:
+      gluetun:
+        condition: service_started
+        restart: true
+    restart: unless-stopped
