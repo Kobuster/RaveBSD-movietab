@@ -15,6 +15,7 @@ RUN if [ "$WITH_BROWSER" = "1" ]; then \
 
 COPY src ./src
 COPY public ./public
+RUN chmod -R a+rX /app
 
 # BUILD_ID is the git commit, passed in by the publish workflow. It is shown in the admin panel under System.
 ARG BUILD_ID=
