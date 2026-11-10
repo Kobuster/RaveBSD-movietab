@@ -4,5 +4,6 @@ node_modules/
 .env
 books/
 audiobooks/
+movies/
 downloads/
 qbittorrent/

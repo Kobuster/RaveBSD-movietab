@@ -13,7 +13,8 @@ import crypto from 'node:crypto';
 import { EventEmitter, once } from 'node:events';
 import { DATA, settings, readJson, writeJson, setAside, cannotRead, countDownload, countSaved } from './config.js';
 import { applyTemplate, singleFileAudiobook, numberedPath, tidyName, safeSegment } from './rename.js';
-import { getResult, resolveOne, zlibFileLink, freshLibgenLink, currentUA, RESOLVABLE } from './sources.js';
+import { getResult, resolveOne, zlibFileLink, freshLibgenLink, currentUA, canResolve } from './sources.js';
+import { kindOf, KINDS, VIDEO_EXT } from './kinds.js';
 import * as qbit from './qbit.js';
 import { vpnBlocks } from './vpn.js';
 import { listFiles, extractZip } from './zip.js';
@@ -39,8 +40,8 @@ for (const j of shelf.jobs) if (j.how === 'direct' && !/^(failed)$/.test(j.state
 for (const j of shelf.jobs) delete j.ctrl;
 const save = () => writeJson(SHELF_FILE, shelf);
 
-const dirFor = kind => path.resolve(kind === 'audiobook' ? settings.shelves.audioDir : settings.shelves.ebookDir);
-const templateFor = kind => (kind === 'audiobook' ? settings.shelves.audioTemplate : settings.shelves.ebookTemplate);
+const dirFor = kind => path.resolve(kind === 'audiobook' ? settings.shelves.audioDir : kind === 'movie' ? settings.shelves.movieDir : settings.shelves.ebookDir);
+const templateFor = kind => (kind === 'audiobook' ? settings.shelves.audioTemplate : kind === 'movie' ? settings.shelves.movieTemplate : settings.shelves.ebookTemplate);
 const key = (kind, title, author) => [kind, title, author].map(s => tidyName(s).toLowerCase()).join('|');
 const bookOf = r => ({ author: r.author, title: r.title, year: r.year, series: r.series, narrator: r.narrator, ext: r.format });
 
@@ -95,16 +96,16 @@ function attach(item, vid) {
 const onShelfKeys = () => new Set(shelf.items.filter(i => !i.removedAt && !i.moved).map(i => key(i.kind, i.title, i.author)));
 let shelfKeys = onShelfKeys();
 export function decorateResult(r) {
-    r.kind = r._mode === 'audiobooks' ? 'audiobook' : 'ebook';
+    r.kind = kindOf(r._mode);
     // AudiobookBay results are always magnets. Their links are read from the post only when used (download,
     // copy, torrent file): reading every post per search got this server's address refused by the site.
-    r.linkType = r.magnet || r.source === 'AudiobookBay' ? 'magnet' : r.directUrl ? 'direct' : RESOLVABLE.has(r.source) && !r._resolved ? 'pending' : 'page';
+    r.linkType = r.magnet || r.source === 'AudiobookBay' ? 'magnet' : r.directUrl ? 'direct' : canResolve(r) && !r._resolved ? 'pending' : 'page';
     return Object.assign(r, liveMarks(null, r));
 }
 // What changes after a search is cached (server.js puts it right on every answer): whether the book is on the
 // shelf (for a visitor, their own), a download already running for it, and where today's template files it.
 export function liveMarks(me, r) {
-    const kind = r.kind || (r._mode === 'audiobooks' ? 'audiobook' : 'ebook');
+    const kind = r.kind || kindOf(r._mode);
     const t = templateFor(kind);
     const job = shelf.jobs.find(j => j.resultId === r.id && canSee(me, j));
     return {
@@ -155,7 +156,7 @@ export async function startDownload(resultId, clientId, me) {
         if (visitorsTotal() + (r.filesize || 0) > totalCap()) throw new Error('This server is full for now. Try again in a few days, when older downloads are cleared.');
         if (shelf.jobs.filter(j => j.ip && j.ip === me.ip && j.state !== 'failed').length >= VISITOR_JOBS_PER_IP) throw new Error(`Wait for your ${VISITOR_JOBS_PER_IP} downloads to finish first.`);
     }
-    const kind = r._mode === 'audiobooks' ? 'audiobook' : 'ebook';
+    const kind = kindOf(r._mode);
     const job = {
         id: newId(), resultId, clientId: String(clientId || '').slice(0, 64), kind,
         title: r.title || 'Untitled', author: r.author || '', year: r.year || '', series: r.series || '', narrator: r.narrator || '',
@@ -231,7 +232,7 @@ export function pump() {
         runDirect(j).finally(() => {
             running--;
             // The last download out removes the temp folders, when empty.
-            if (!running) for (const k of ['ebook', 'audiobook']) fs.rmdir(path.join(dirFor(k), '.incoming'), () => {});
+            if (!running) for (const k of KINDS) fs.rmdir(path.join(dirFor(k), '.incoming'), () => {});
             pump();
         });
     }
@@ -422,8 +423,11 @@ export async function fileIt(j, files, { copy = false, srcRoot = '' } = {}) {
     const audio = files.filter(f => AUDIO_EXT.test(f));
     const multi = j.kind === 'audiobook' && audio.length > 1;
     if (!multi) {
-        // One file: the book itself (for torrents, the biggest matching file).
+        // One file: the book itself (for torrents, the biggest matching file). A movie is its biggest video, so
+        // samples, subtitles and artwork in the same torrent are left behind.
+        const videos = j.kind === 'movie' ? files.filter(f => VIDEO_EXT.test(f)) : [];
         const pick = files.length === 1 ? files[0]
+            : videos.length ? videos.sort((a, b) => fs.statSync(b).size - fs.statSync(a).size)[0]
             : (j.kind === 'audiobook' ? audio : files.filter(f => /\.(epub|pdf|mobi|azw3?|fb2|djvu|cbz|cbr|txt|rtf|docx?)$/i.test(f)))
                 .concat(files).sort((a, b) => fs.statSync(b).size - fs.statSync(a).size)[0];
         const ext = (pick.match(/\.([a-z0-9]{2,5})$/i) || [])[1] && !pick.endsWith('.part') ? pick.match(/\.([a-z0-9]{2,5})$/i)[1] : j.format || 'bin';
@@ -534,7 +538,7 @@ export const getItem = id => shelf.items.find(i => i.id === id);
 export function fileFor(item) {
     if (!item || item.removedAt || item.moved) return null;
     const p = path.resolve(item.path);
-    const okDir = [dirFor('ebook'), dirFor('audiobook')].some(d => p.startsWith(d + path.sep));
+    const okDir = KINDS.map(dirFor).some(d => p.startsWith(d + path.sep));
     if (!okDir || !exists(p)) return null;
     return { path: p, isDir: fs.statSync(p).isDirectory() };
 }
@@ -621,9 +625,10 @@ export async function freeSpace(dir) {
 export let lowSpace = false;
 export async function checkSpace() {
     const limit = settings.storage.lowSpaceGB * 1e9;
-    const [a, b] = limit ? await Promise.all([freeSpace(dirFor('ebook')), freeSpace(dirFor('audiobook'))]) : [{}, {}];
-    const low = !!limit && !!((a.total && a.free < limit) || (b.total && b.free < limit));
-    if (low && !lowSpace) emit('lowSpace', { free: Math.min(a.free || Infinity, b.free || Infinity), dir: a.free <= b.free ? dirFor('ebook') : dirFor('audiobook') });
+    const all = limit ? await Promise.all(KINDS.map(k => freeSpace(dirFor(k)))) : [];
+    const short = all.map((s, i) => [s, KINDS[i]]).filter(([s]) => s.total && s.free < limit).sort((x, y) => x[0].free - y[0].free);
+    const low = !!limit && short.length > 0;
+    if (low && !lowSpace) emit('lowSpace', { free: short[0][0].free, dir: dirFor(short[0][1]) });
     if (low !== lowSpace) { lowSpace = low; emit('status', {}); }
 }
 
@@ -658,8 +663,8 @@ setTimeout(() => { checkMoved(); checkSpace(); tidy(); }, 2000).unref();
 
 // Sizes on the shelf per kind, for the Stats storage card.
 export function shelfBytes() {
-    const out = { ebook: 0, audiobook: 0 };
-    for (const i of shelf.items) if (!i.removedAt && !i.moved) out[i.kind] += i.size || 0;
+    const out = { ebook: 0, audiobook: 0, movie: 0 };
+    for (const i of shelf.items) if (!i.removedAt && !i.moved) out[i.kind] = (out[i.kind] || 0) + (i.size || 0);
     return out;
 }
 
@@ -668,7 +673,7 @@ export const shelfBackup = () => JSON.parse(JSON.stringify({ items: shelf.items 
 export function shelfRestore(data) {
     if (!data || !Array.isArray(data.items)) return;
     // A restored list may only point inside the shelf folders, so a crafted backup cannot aim Delete elsewhere.
-    const roots = [dirFor('ebook'), dirFor('audiobook')];
+    const roots = KINDS.map(dirFor);
     shelf.items = data.items.filter(i => i && typeof i.id === 'string' && typeof i.path === 'string'
         && roots.some(d => path.resolve(i.path).startsWith(d + path.sep)));
     shelfKeys = onShelfKeys();

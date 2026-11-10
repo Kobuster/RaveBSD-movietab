@@ -14,7 +14,7 @@ export async function mount(el, opts) {
     st = {
         // PUBLIC_INSTANCE=1 on the server: public mode is the only choice.
         forced: !!s.access.publicForced, step: 1, dir: 1, auth: s.access.publicForced ? 'public' : 'none', username: 'admin', password: '', password2: '',
-        ebookDir: s.shelves.ebookDir, audioDir: s.shelves.audioDir, ebookTemplate: s.shelves.ebookTemplate, audioTemplate: s.shelves.audioTemplate,
+        ebookDir: s.shelves.ebookDir, audioDir: s.shelves.audioDir, movieDir: s.shelves.movieDir || '', ebookTemplate: s.shelves.ebookTemplate, audioTemplate: s.shelves.audioTemplate, movieTemplate: s.shelves.movieTemplate || '',
         names: false, qb: false, qbt: 'idle', qbVersion: '', qbManual: false, qbUrl: s.qbit.url, qbUser: '', qbPass: '', folders: null, error: '',
     };
     draw(true);
@@ -25,16 +25,18 @@ const sample = () => '/' + [st.ebookDir.replace(/^\/+|\/+$/g, ''), applyTemplate
 function folderLine() {
     const f = st.folders;
     if (!f) return '<span class="desc" id="fstat">Checking the folders…</span>';
-    const bad = ['ebookDir', 'audioDir'].filter(k => !f[k].writable);
-    if (bad.length) return `<span class="err" id="fstat">${bad.length > 1 ? 'The eBooks and audiobooks folders are' : bad[0] === 'ebookDir' ? 'The eBooks folder is' : 'The audiobooks folder is'} not writable. Check the volume in compose.yaml.</span>`;
-    const free = Math.min(f.ebookDir.free, f.audioDir.free);
-    return `<span class="ok" id="fstat">Both writable · ${size(free) || '0 KB'} free</span>`;
+    const NAMES = { ebookDir: 'eBooks', audioDir: 'audiobooks', movieDir: 'movies' };
+    const keys = Object.keys(NAMES).filter(k => f[k]);
+    const bad = keys.filter(k => !f[k].writable);
+    if (bad.length) return `<span class="err" id="fstat">The ${bad.map(k => NAMES[k]).join(' and ')} folder${bad.length > 1 ? 's are' : ' is'} not writable. Check the volume in compose.yaml.</span>`;
+    const free = Math.min(...keys.map(k => f[k].free));
+    return `<span class="ok" id="fstat">All writable · ${size(free) || '0 KB'} free</span>`;
 }
 let fTimer;
 function checkFolders() {
     clearTimeout(fTimer);
     fTimer = setTimeout(async () => {
-        try { st.folders = await api('/api/folders', { body: { ebookDir: st.ebookDir, audioDir: st.audioDir } }); } catch (e) { st.folders = null; }
+        try { st.folders = await api('/api/folders', { body: { ebookDir: st.ebookDir, audioDir: st.audioDir, movieDir: st.movieDir } }); } catch (e) { st.folders = null; }
         const el = $('#fstat'); if (el) el.outerHTML = folderLine();
     }, 300);
 }
@@ -58,13 +60,15 @@ function stepHtml() {
         <div><h1>Where do books <span class="serif" style="color:#5EEAB4">live?</span></h1>
         <p class="lede" style="margin-top:8px">Finished downloads are renamed your way and put on these shelves. Map real folders into the container in <span class="mono" style="font-size:15px;color:var(--paper)">compose.yaml</span>.</p></div>
         <div class="fields"><label class="field">eBooks<input class="input mono priv" data-k="ebookDir" value="${esc(s.ebookDir)}" spellcheck="false"></label>
-            <label class="field">Audiobooks<input class="input mono priv" data-k="audioDir" value="${esc(s.audioDir)}" spellcheck="false"></label></div>
+            <label class="field">Audiobooks<input class="input mono priv" data-k="audioDir" value="${esc(s.audioDir)}" spellcheck="false"></label>
+            <label class="field">Movies<input class="input mono priv" data-k="movieDir" value="${esc(s.movieDir)}" spellcheck="false"></label></div>
         ${folderLine()}
         <div class="slip" id="slip"><s>Dune_-_Frank_Herbert_(z-lib.org).epub</s><b>${privPath(sample())}</b></div>
         <button type="button" class="disclose" data-act="names" aria-expanded="${s.names}" aria-controls="namesf">${s.names ? 'Keep the usual names' : 'Change how files are named'}${chevron(16)}</button>
         ${s.names ? `<div class="reveal" id="namesf" style="display:flex;flex-direction:column;gap:16px">
             <label class="field">How eBooks are named<input class="input mono" data-k="ebookTemplate" value="${esc(s.ebookTemplate)}" spellcheck="false"></label>
-            <label class="field">How audiobooks are named<input class="input mono" data-k="audioTemplate" value="${esc(s.audioTemplate)}" spellcheck="false"></label></div>` : ''}
+            <label class="field">How audiobooks are named<input class="input mono" data-k="audioTemplate" value="${esc(s.audioTemplate)}" spellcheck="false"></label>
+            <label class="field">How movies are named<input class="input mono" data-k="movieTemplate" value="${esc(s.movieTemplate)}" spellcheck="false"></label></div>` : ''}
         </div>`;
     if (s.step === 3) {
         const t = s.qbt, manual = s.qbManual || t === 'failed';
@@ -95,7 +99,7 @@ function stepHtml() {
         <p class="lede" style="margin-top:8px">What you search for is never saved. Settings and logins stay in the data folder on this machine and go nowhere else.</p></div>
         <div class="tiles" data-tiles>
             <div><span>Access</span><b>${s.auth === 'public' ? 'Public, admin ' + esc(s.username || 'admin') : s.auth === 'family' ? 'Friends and family, admin ' + esc(s.username || 'admin') : s.auth === 'pw' ? 'Just me, user ' + esc(s.username || 'admin') : 'Just me, no password'}</b></div>
-            <div><span>Shelves</span><b class="mono">${priv(esc(s.ebookDir))} · ${priv(esc(s.audioDir))}</b></div>
+            <div><span>Shelves</span><b class="mono">${priv(esc(s.ebookDir))} · ${priv(esc(s.audioDir))} · ${priv(esc(s.movieDir))}</b></div>
             <div><span>eBooks named</span><b class="mono">${esc(s.ebookTemplate)}</b></div>
             <div><span>Magnets go to</span><b>${s.qb ? 'qBittorrent' : 'Nothing yet'}</b></div></div>
         <div class="dash">${icon('shield', 22)}<span>Want searches and downloads to leave through a VPN? Route them through Gluetun any time in the admin panel, under VPN tunnel.</span></div>
@@ -137,7 +141,7 @@ const redraw = () => draw(false);
 function onInput(e) {
     const k = e.target.dataset.k; if (!k) return;
     st[k] = e.target.value;
-    if (k === 'ebookDir' || k === 'audioDir') checkFolders();
+    if (k === 'ebookDir' || k === 'audioDir' || k === 'movieDir') checkFolders();
     if (k === 'ebookDir' || k === 'ebookTemplate') { const sl = $('#slip b'); if (sl) sl.innerHTML = privPath(sample()); }
     if (k.startsWith('qb') && st.qbt !== 'idle') { st.qbt = 'idle'; }
 }
@@ -175,7 +179,7 @@ async function onClick(e) {
                 await api('/api/setup', { body: {
                     mode: s.auth === 'public' || s.auth === 'family' ? s.auth : 'private',
                     admin: s.auth !== 'none' ? { username: s.username, password: s.password } : null,
-                    shelves: { ebookDir: s.ebookDir, audioDir: s.audioDir, ebookTemplate: s.ebookTemplate, audioTemplate: s.audioTemplate },
+                    shelves: { ebookDir: s.ebookDir, audioDir: s.audioDir, movieDir: s.movieDir, ebookTemplate: s.ebookTemplate, audioTemplate: s.audioTemplate, movieTemplate: s.movieTemplate },
                     qbit: s.qb ? { enabled: true, url: s.qbUrl, ...(s.qbUser ? { username: s.qbUser } : {}), ...(s.qbPass ? { password: s.qbPass } : {}) } : { enabled: false },
                 } });
                 history.replaceState(null, '', '/');

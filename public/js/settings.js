@@ -112,7 +112,7 @@ function libraries() {
     const off = new Set(sv().sources.off);
     const answering = st.filter(l => !['annas', 'zlibrary', 'mobilism'].includes(l.id));
     const needYou = st.filter(l => ['needsHuman', 'error'].includes(l.state) || (l.id === 'mobilism' && !libs.mobilism.login)).length;
-    const links = sv().justLinks.ebooks.length + sv().justLinks.audiobooks.length;
+    const links = Object.values(sv().justLinks).reduce((n, l) => n + l.length, 0);
     const a = libs ? libs.annas : {}, z = libs ? libs.zlib : {}, m = libs ? libs.mobilism : {};
     const annasState = off.has('annas') ? 'Switched off' : a.needsVerify ? 'Needs a human' : 'Answering';
     const mirrorInfo = mirrorList('annas');
@@ -158,14 +158,15 @@ function libraries() {
         <section aria-label="Working libraries" class="sset" style="gap:16px">
             <div class="items-h"><h3 class="h-sub" style="font-size:26px">Awake and answering <span class="count">${answering.filter(l => !off.has(l.id)).length}</span></h3><span class="desc" style="font-size:14px">Switch off any you never use and searches get quicker.</span></div>
             <div class="libgrid">${answering.map(l => {
-                const [info, colour] = SRC_INFO[l.id] || ['', '#FBF8FF'];
+                const [info, colour] = SRC_INFO[l.id] || [l.about || '', l.colour || '#FBF8FF'];
                 const [stText, stCol] = STATE_TEXT[l.state] || STATE_TEXT.ok;
                 return `<div class="lib" style="border-top-color:${colour}"><div class="lh"><b>${esc(l.name)}</b>${sw(!off.has(l.id), l.name, `data-src="${l.id}"`)}</div>
-                    <span class="desc" style="font-size:14px">${esc(info)}</span><span class="lst" style="color:${stCol}">${stText}${l.ms != null && l.state !== 'off' ? ' · ' + (l.ms < 1000 ? l.ms + ' ms' : (l.ms / 1000).toFixed(1) + ' s') : ''}</span></div>`;
-            }).join('')}</div></section>
+                    <span class="desc" style="font-size:14px">${esc(info)}</span>${l.scraper ? `<span class="desc mono" style="font-size:12px">${l.from === 'yours' ? 'your file' : 'drop-in'} · ${esc(l.file)}</span>` : ''}<span class="lst" style="color:${stCol}">${stText}${l.ms != null && l.state !== 'off' ? ' · ' + (l.ms < 1000 ? l.ms + ' ms' : (l.ms / 1000).toFixed(1) + ' s') : ''}</span></div>`;
+            }).join('')}</div>
+            ${scraperNote()}</section>
         <section aria-label="Link-only sites" class="sset" id="links" style="gap:16px">
             <div class="items-h"><h3 class="h-sub" style="font-size:26px">Just links <span class="count">${links}</span></h3><span class="desc" style="font-size:14px">Sites we can only point you to. Your browser visits them, RaveBSD never does.</span></div>
-            <div class="seg" role="radiogroup" aria-label="Which list">${segBtns([['ebooks', 'eBooks', false], ['audiobooks', 'Audiobooks', false]], ui.linksKind, 'data-act="linkskind"')}</div>
+            <div class="seg" role="radiogroup" aria-label="Which list">${segBtns([['ebooks', 'eBooks', false], ['audiobooks', 'Audiobooks', false], ['movies', 'Movies', false]], ui.linksKind, 'data-act="linkskind"')}</div>
             <div class="linkpills">${sv().justLinks[ui.linksKind].map((l, i) => `<span class="jl" style="background:${PILL_COLOURS[i % 8]}" title="${esc(l.url)}">${esc(l.name)}<button type="button" aria-label="Remove ${esc(l.name)}" data-act="rmlink" data-i="${i}">×</button></span>`).join('') || '<span class="desc">No sites in this list.</span>'}</div>
             <form class="addsite" data-form="addlink"><label class="field">Name<input class="input" name="name" placeholder="My local library" required maxlength="60"></label>
                 <label class="field">Search page address, with {q} where the words go<input class="input mono" name="url" placeholder="https://library.example.org/?s={q}" required style="font-size:15px"></label>
@@ -175,6 +176,15 @@ function libraries() {
     <section class="sset" id="settings" style="margin-top:56px"><h2 class="h-sec">Preferences</h2></section>`;
 }
 
+// Drop-in scrapers: where to put them, and any file that could not be used (with why).
+function scraperNote() {
+    const sc = libs && libs.scrapers;
+    if (!sc) return '';
+    const bad = sc.problems || [];
+    return `<div class="card" style="padding:18px 20px;display:flex;flex-direction:column;gap:8px">
+        <span class="desc" style="font-size:14px;line-height:1.55">Scrapers marked as drop-in come from files. Add your own to <span class="mono priv" style="font-size:13px">${esc(sc.dir)}</span> (on the host: <span class="mono" style="font-size:13px">./scrapers</span> next to compose.yaml). The next search picks them up.</span>
+        ${bad.map(p => `<span class="err" style="font-size:14px"><b class="mono" style="font-size:13px">${esc(p.file)}</b> was skipped: ${esc(p.error)}</span>`).join('')}</div>`;
+}
 // The Just links list for the open tab differs from the one RaveBSD ships with.
 const linksChanged = () => { const d = sv().defaults && sv().defaults.justLinks; return !!d && JSON.stringify(sv().justLinks[ui.linksKind]) !== JSON.stringify(d[ui.linksKind]); };
 // ── Mirrors from SLUM ────────────────────────────────────────────────────────
@@ -310,32 +320,39 @@ const SAMPLES = [
     ['ebook', 'Dune_-_Frank_Herbert_(z-lib.org).epub', { author: 'Frank Herbert', title: 'Dune', year: '1965', ext: 'epub' }, -0.4],
     ['ebook', 'Foundation (Asimov Isaac) [1951].mobi', { author: 'Isaac Asimov', title: 'Foundation', year: '1951', ext: 'mobi' }, 0.5],
     ['audiobook', 'The.Hobbit.Tolkien.64kbps/Part 03.mp3', { author: 'J. R. R. Tolkien', title: 'The Hobbit', year: '2011', narrator: 'Andy Serkis', ext: 'mp3', track: 3, trackCount: 19 }, -0.3],
+    ['movie', 'Nosferatu_1922_512kb.mp4', { author: 'F. W. Murnau', title: 'Nosferatu', year: '1922', ext: 'mp4' }, 0.3],
 ];
+const dirOf = (s, kind) => (kind === 'audiobook' ? s.audioDir : kind === 'movie' ? s.movieDir : s.ebookDir) || '';
+const tplOf = (s, kind) => (kind === 'audiobook' ? s.audioTemplate : kind === 'movie' ? s.movieTemplate : s.ebookTemplate);
 function previews() {
     const s = sv().shelves;
     return SAMPLES.map(([kind, was, b, rot]) => {
-        const dir = (kind === 'audiobook' ? s.audioDir : s.ebookDir).replace(/\/+$/, '');
-        const name = s.rename ? applyTemplate(kind === 'audiobook' ? s.audioTemplate : s.ebookTemplate, b, { tidy: s.tidy }) : (s.tidy ? was.replace(/_/g, ' ').replace(/\s*\(z-lib\.org\)/, '') : was);
+        const dir = dirOf(s, kind).replace(/\/+$/, '');
+        const name = s.rename ? applyTemplate(tplOf(s, kind), b, { tidy: s.tidy }) : (s.tidy ? was.replace(/_/g, ' ').replace(/\s*\(z-lib\.org\)/, '') : was);
         return `<div class="slip" style="transform:rotate(${rot}deg)"><s>${esc(was)}</s><b>${priv(esc(dir))}/${esc(name)}</b></div>`;
     }).join('');
 }
 function folderLine() {
     const f = ui.folders;
     if (!f) return '<span class="desc" id="fline" style="font-size:14px">Checking the folders…</span>';
-    const bad = ['ebookDir', 'audioDir'].filter(k => !f[k].writable);
-    if (bad.length) return `<span class="err" id="fline">${bad.length > 1 ? 'The eBooks and audiobooks folders are' : bad[0] === 'ebookDir' ? 'The eBooks folder is' : 'The audiobooks folder is'} not writable. Check the volume in compose.yaml.</span>`;
-    return `<span class="ok" id="fline">Both writable · ${size(Math.min(f.ebookDir.free, f.audioDir.free)) || '0 KB'} free</span>`;
+    const NAMES = { ebookDir: 'eBooks', audioDir: 'audiobooks', movieDir: 'movies' };
+    const keys = Object.keys(NAMES).filter(k => f[k]);
+    const bad = keys.filter(k => !f[k].writable);
+    if (bad.length) return `<span class="err" id="fline">The ${bad.map(k => NAMES[k]).join(' and ')} folder${bad.length > 1 ? 's are' : ' is'} not writable. Check the volume in compose.yaml.</span>`;
+    return `<span class="ok" id="fline">All writable · ${size(Math.min(...keys.map(k => f[k].free))) || '0 KB'} free</span>`;
 }
 function shelves() {
     const s = sv().shelves;
     return head('shelves', 'Shelves and names') + `<div class="card" style="display:flex;flex-direction:column;gap:22px;padding:${isPhone() ? 20 : 26}px">
         <p class="desc" style="margin:0;font-size:16px;line-height:1.55">Everything RaveBSD fetches is renamed from what the search result knows (title, author, year, narrator), not from whatever the file was called, and filed here.</p>
         <div class="fields"><label class="field" style="flex-basis:280px">eBooks folder<input class="input mono priv" data-text="shelves.ebookDir" value="${esc(s.ebookDir)}" spellcheck="false"></label>
-            <label class="field" style="flex-basis:280px">Audiobooks folder<input class="input mono priv" data-text="shelves.audioDir" value="${esc(s.audioDir)}" spellcheck="false"></label></div>
+            <label class="field" style="flex-basis:280px">Audiobooks folder<input class="input mono priv" data-text="shelves.audioDir" value="${esc(s.audioDir)}" spellcheck="false"></label>
+            <label class="field" style="flex-basis:280px">Movies folder<input class="input mono priv" data-text="shelves.movieDir" value="${esc(s.movieDir)}" spellcheck="false"></label></div>
         ${folderLine()}
         <div style="display:flex;flex-direction:column;gap:16px;padding-top:22px;border-top:1px solid rgba(255,255,255,0.12)">
             <label class="field">How eBooks are named<input class="input mono" data-text="shelves.ebookTemplate" data-tpl="ebookTemplate" value="${esc(s.ebookTemplate)}" spellcheck="false"></label>
             <label class="field">How audiobooks are named<input class="input mono" data-text="shelves.audioTemplate" data-tpl="audioTemplate" value="${esc(s.audioTemplate)}" spellcheck="false"></label>
+            <label class="field">How movies are named<input class="input mono" data-text="shelves.movieTemplate" data-tpl="movieTemplate" value="${esc(s.movieTemplate)}" spellcheck="false"></label>
             <div class="tokens"><span style="font-size:13px;font-weight:600;color:var(--text2);margin-right:4px">Click to add</span>${TOKENS.map((t, i) => `<button type="button" data-act="token" data-v="{${t}}" style="background:${TOKEN_COLOURS[i]}">{${t}}</button>`).join('')}</div></div>
         <div style="display:flex;flex-direction:column;gap:14px"><span class="label" style="color:var(--text2)">What it will do to your files</span><div id="previews" style="display:flex;flex-direction:column;gap:14px">${previews()}</div></div>
         <div class="rows subrows" style="border-top:1px solid rgba(255,255,255,0.12)">
@@ -446,7 +463,7 @@ function checkFolders() {
     clearTimeout(fTimer);
     fTimer = setTimeout(async () => {
         const s = sv().shelves;
-        try { ui.folders = await api('/api/folders', { body: { ebookDir: s.ebookDir, audioDir: s.audioDir } }); } catch (e) { ui.folders = null; }
+        try { ui.folders = await api('/api/folders', { body: { ebookDir: s.ebookDir, audioDir: s.audioDir, movieDir: s.movieDir } }); } catch (e) { ui.folders = null; }
         const el = $('#fline'); if (el) el.outerHTML = folderLine();
     }, 250);
 }
@@ -527,7 +544,7 @@ async function click(e) {
     switch (t.dataset.act) {
         case 'attention': return goAttention();
         case 'resetlinks': {
-            if (!await confirmBox('Reset the list?', `The ${ui.linksKind === 'audiobooks' ? 'audiobook' : 'eBook'} sites go back to the ones RaveBSD started with. Sites you added are removed.`, 'Reset', false)) return;
+            if (!await confirmBox('Reset the list?', `The ${({ ebooks: 'eBook', audiobooks: 'audiobook', movies: 'movie' })[ui.linksKind]} sites go back to the ones RaveBSD started with. Sites you added are removed.`, 'Reset', false)) return;
             if (await patch('justLinks.' + ui.linksKind, sv().defaults.justLinks[ui.linksKind])) { drawSection('libraries'); toast('Back to the original list'); }
             return;
         }

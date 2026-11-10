@@ -23,7 +23,10 @@ const LINK = {
     magnet: { text: 'magnet', ring: '#D68FE0', bg: '#F0D3FF', dot: '#9A3FB0', dbg: 'rgba(214,143,224,0.22)', dfg: '#F0C6F6' },
     pending: { text: 'finding the file link', short: 'checking…', ring: 'rgba(255,255,255,0.55)', bg: 'rgba(255,255,255,0.6)', dot: '#8A86A8', dbg: 'rgba(255,255,255,0.1)', dfg: '#D8D3CC' },
 };
-const FORMATS = { ebooks: ['epub', 'pdf', 'mobi', 'azw3'], audiobooks: ['m4b', 'mp3', 'zip'] };
+const FORMATS = { ebooks: ['epub', 'pdf', 'mobi', 'azw3'], audiobooks: ['m4b', 'mp3', 'zip'], movies: ['mp4', 'mkv', 'webm', 'avi'] };
+const MODES = ['ebooks', 'audiobooks', 'movies'];
+// The colour the search words are shown in, per kind.
+const QCOL = { ebooks: '#FFD54A', audiobooks: '#FF9FE8', movies: '#8FD0FF' };
 const PER_SHELF = 14;
 
 // Everything about the current search lives here, so leaving for the Shelf and coming back keeps it.
@@ -70,7 +73,7 @@ export async function mount(el, { path, state }) {
 // the browser's address bar; the server still never writes searches down.
 function resultsUrl() {
     const p = new URLSearchParams({ q: S.q });
-    if (S.mode === 'audiobooks') p.set('mode', 'audiobooks');
+    if (S.mode !== 'ebooks') p.set('mode', S.mode);
     const a = S.adv;
     if (a) {
         for (const k of ['title', 'author', 'isbn']) if (a[k]) p.set(k, a[k]);
@@ -87,7 +90,7 @@ function fromUrl() {
     const t = k => (p.get(k) || '').trim().slice(0, 300);
     const adv = { title: t('title'), author: t('author'), isbn: t('isbn').replace(/[\s-]/g, ''), lang: (p.get('lang') || '').slice(0, 20), from: (p.get('from') || '').replace(/\D/g, '').slice(0, 4), to: (p.get('to') || '').replace(/\D/g, '').slice(0, 4), formats };
     const hasAdv = formats.length || adv.lang || adv.from || adv.to || adv.title || adv.author || adv.isbn;
-    return { q: (p.get('q') || '').trim().slice(0, 300), mode: p.get('mode') === 'audiobooks' ? 'audiobooks' : 'ebooks', adv: hasAdv ? adv : null };
+    return { q: (p.get('q') || '').trim().slice(0, 300), mode: MODES.includes(p.get('mode')) ? p.get('mode') : 'ebooks', adv: hasAdv ? adv : null };
 }
 export function unmount() {
     document.removeEventListener('keydown', onDocKey);
@@ -104,7 +107,8 @@ export const lastResults = () => (S.q ? resultsUrl() : null);
 // ── Discover ─────────────────────────────────────────────────────────────────
 const modeSwitch = (cls = 'modeswitch') => `<div class="${cls}" role="radiogroup" aria-label="Search in">
     <button type="button" role="radio" aria-checked="${S.mode === 'ebooks'}" data-act="mode" data-v="ebooks">eBooks</button>
-    <button type="button" role="radio" aria-checked="${S.mode === 'audiobooks'}" data-act="mode" data-v="audiobooks">Audiobooks</button></div>`;
+    <button type="button" role="radio" aria-checked="${S.mode === 'audiobooks'}" data-act="mode" data-v="audiobooks">Audiobooks</button>
+    <button type="button" role="radio" aria-checked="${S.mode === 'movies'}" data-act="mode" data-v="movies">Movies</button></div>`;
 const goBtn = (sz, ic) => `<button type="submit" class="gobtn" aria-label="Find it" style="width:${sz}px;height:${sz}px">${icon('search', ic, 2.6)}</button>`;
 
 let overlay = null;
@@ -154,7 +158,7 @@ function advPanel(phone) {
         <div class="fields"><label class="field">Language<span class="selwrap paper"><select id="a-lang">${langs.map(l => `<option${a.lang === l ? ' selected' : ''}>${l}</option>`).join('')}</select>${chevron(14)}</span></label>
             <div class="fields two"><label class="field">Published from<input class="input" id="a-from" placeholder="1965" inputmode="numeric" maxlength="4" value="${esc(a.from || '')}"></label>
             <label class="field">to<input class="input" id="a-to" placeholder="2024" inputmode="numeric" maxlength="4" value="${esc(a.to || '')}"></label></div></div>
-        <div class="field">Format${chips('ebooks')}${chips('audiobooks')}</div>
+        <div class="field">Format${chips('ebooks')}${chips('audiobooks')}${chips('movies')}</div>
         <div class="adv-btns"><button type="button" class="btn outline" data-act="adv-clear">Clear</button><button type="button" class="btn yellow" data-act="adv-go">Search with these</button></div>
         </div></div>`;
 }
@@ -196,7 +200,7 @@ function searchUrl(q, mode, adv) {
 
 function resetFilters() {
     const st = app.settings ? app.settings.searching : { links: 'direct', length: 'unabridged' };
-    S.f = { fmt: 'all', link: S.mode === 'ebooks' && st.links === 'direct' ? 'direct' : 'any', len: S.mode === 'audiobooks' ? st.length : 'any', narrator: '', sort: 'best' };
+    S.f = { fmt: 'all', link: S.mode !== 'audiobooks' && st.links === 'direct' ? 'direct' : 'any', len: S.mode === 'audiobooks' ? st.length : 'any', narrator: '', sort: 'best' };
     if (S.adv && S.adv.formats.length === 1) S.f.fmt = S.adv.formats[0];
 }
 
@@ -240,6 +244,7 @@ async function startSearch(q, adv, fromDiscover) {
             // A repeat search answered from memory: everything at once.
             const j = await res.json();
             if (seq !== S.seq) return; // a newer search started meanwhile: this answer is not for it
+            Object.assign(LIBS, j.labels || {});
             S.sources = Object.keys(j.meta || {}).filter(k => k in LIBS && (j.meta[k] > 0));
             S.answered = S.sources.slice();
             onEvent({ final: j }, flow);
@@ -254,7 +259,7 @@ async function startSearch(q, adv, fromDiscover) {
 }
 
 function onEvent(ev, flow) {
-    if (ev.sources) { S.sources = ev.sources; if (flow) flow.progress(); return; }
+    if (ev.sources) { Object.assign(LIBS, ev.labels || {}); S.sources = ev.sources; if (flow) flow.progress(); return; }
     if (ev.done) {
         if (!S.answered.includes(ev.done)) S.answered.push(ev.done);
         S.status[ev.done] = ev.status;
@@ -490,7 +495,7 @@ function filtered() {
     let list = S.results.filter(r => {
         const fmt = String(r.format || '').toLowerCase();
         if (f.fmt !== 'all' && fmt !== f.fmt) return false;
-        if (S.mode === 'ebooks') {
+        if (S.mode !== 'audiobooks') {
             if (f.link === 'direct' && !['direct', 'pending'].includes(r.linkType)) return false;
         } else {
             // Length is often unknown; unknown recordings stay in.
@@ -605,7 +610,7 @@ const viewBtns = () => [['shelf', 'Shelf view', 'shelf'], ['list', 'List view', 
 function heading(list) {
     const audio = S.mode === 'audiobooks';
     const n = S.results.length, total = S.sources.length, answered = S.answered.length;
-    const qcol = audio ? '#FF9FE8' : '#FFD54A';
+    const qcol = QCOL[S.mode] || QCOL.ebooks;
     let title;
     if (S.searching && !n) title = `Searching for <span class="serif" style="color:${qcol}">“${esc(S.q)}”</span>`;
     else title = `${n} result${n === 1 ? '' : 's'} for <span class="serif" style="color:${qcol}">“${esc(S.q)}”</span>`;
@@ -656,6 +661,8 @@ function filters(phone) {
 function body(list, r, v, phone) {
     if (!S.results.length) {
         if (S.searching) return `<div class="empty"><b>Asking the libraries…</b><span>Results show up here as they answer.</span></div>`;
+        // Movies come only from drop-in scrapers: with none switched on there is nobody to ask.
+        if (S.mode === 'movies' && S.finished && !S.sources.length && !S.error) return `<div class="empty"><b>No movie sources are switched on</b><span>Switch one on in the admin panel under Libraries, or add a scraper file. The sites below still work.</span></div>`;
         return `<div class="empty"><b>Nothing found${S.error ? '' : ' in the libraries'}</b><span>${S.error ? esc(S.error) : 'Try other words, or one of the sites below.'}</span></div>`;
     }
     if (!list.length) return `<div class="empty"><b>Nothing matches these filters</b><span>${S.results.length} result${S.results.length === 1 ? '' : 's'} are hidden by the filters above.</span><button type="button" class="btn outline sm" data-act="clear-filters">Show everything</button></div>`;
@@ -688,7 +695,7 @@ function spineHtml(r, phone) {
 }
 
 // Where the server files a result. The server sends the place inside the shelf; admins also see the folder.
-const fileAsShown = r => { const sh = (app.settings && app.settings.shelves) || {}, dir = (r.kind === 'audiobook' ? sh.audioDir : sh.ebookDir) || ''; return (dir ? dir.replace(/\/+$/, '') + '/' : '') + (r.fileAs || ''); };
+const fileAsShown = r => { const sh = (app.settings && app.settings.shelves) || {}, dir = (r.kind === 'audiobook' ? sh.audioDir : r.kind === 'movie' ? sh.movieDir : sh.ebookDir) || ''; return (dir ? dir.replace(/\/+$/, '') + '/' : '') + (r.fileAs || ''); };
 // The pulled-out book takes the shape of its real cover (within the usual size, standing on the shelf), so
 // wide or tall covers are not cropped. The back cover follows.
 window.rbsdFitCover = img => {
@@ -702,7 +709,7 @@ window.rbsdFitCover = img => {
 function coverHtml(r, phone) {
     const best = r.id === bestId();
     const audio = S.mode === 'audiobooks';
-    const label = `${audio ? 'Cassette for' : 'Cover of'} ${r.title}, from ${srcName(r.source)}, ${String(r.format || '').toUpperCase()}`;
+    const label = `${audio ? 'Cassette for' : S.mode === 'movies' ? 'Poster of' : 'Cover of'} ${r.title}, from ${srcName(r.source)}, ${String(r.format || '').toUpperCase()}`;
     if (audio) return cassetteHtml(r, phone, best, label);
     const img = r.coverUrl ? `<img src="${coverSrc(r)}" alt="" draggable="false" onload="rbsdFitCover(this)" onerror="this.remove()"><div class="gloss"></div>` : '';
     return `<div class="pulled${phone ? ' ph' : ''}" data-swipe role="option" aria-selected="true" tabindex="0" aria-label="${esc(label)}. Selected. Left and right arrows move along the shelf.">
@@ -759,7 +766,7 @@ function metaLine(r) {
     const audio = S.mode === 'audiobooks';
     // Language only when it is not English, the usual case.
     const lang = r.language && !/^(en|eng|english)\b/i.test(r.language) ? String(r.language) : '';
-    const bits = [r.author, r.series, r.year, audio && r.narrator ? 'read by ' + r.narrator : '', !audio && parseInt(r.pages) > 0 ? parseInt(r.pages) + ' pages' : '', lang].filter(Boolean);
+    const bits = [r.author, r.series, r.year, audio && r.narrator ? 'read by ' + r.narrator : '', !audio && parseInt(r.pages) > 0 ? parseInt(r.pages) + ' pages' : '', S.mode === 'movies' ? r.length : '', lang].filter(Boolean);
     return bits.join(' · ');
 }
 function linkPill(r, small) {
@@ -868,7 +875,7 @@ function listView(list, phone) {
             <span class="lsrc">${esc(srcName(r.source))}</span><span class="llink">${pill}</span>
             <span class="lact">${audio ? `<span class="lact-top">${b.main}${b.open}</span>${b.mag}` : b.main + b.open}</span></article>`;
     }).join('');
-    const head = phone ? '' : `<div class="lhead" aria-hidden="true"><span class="c-th"></span><span class="c-book">${audio ? 'Listen' : 'Book'}</span><span class="c-fmt">Format</span><span class="c-sz">Size</span>${audio ? '<span class="c-len">Length</span>' : ''}<span class="c-src">From</span><span class="c-link">Link</span><span class="c-act"></span></div>`;
+    const head = phone ? '' : `<div class="lhead" aria-hidden="true"><span class="c-th"></span><span class="c-book">${audio ? 'Listen' : S.mode === 'movies' ? 'Film' : 'Book'}</span><span class="c-fmt">Format</span><span class="c-sz">Size</span>${audio ? '<span class="c-len">Length</span>' : ''}<span class="c-src">From</span><span class="c-link">Link</span><span class="c-act"></span></div>`;
     return `<section class="list${audio ? ' audio' : ''}" aria-label="Results">${head}${rows}${list.length > shown ? `<div class="lmore"><span class="desc">${shown} of ${list.length}</span><button type="button" class="btn outline sm" data-act="listmore">Show ${Math.min(50, list.length - shown)} more</button></div>` : ''}</section>`;
 }
 function stackRows(page, delay = 0) {

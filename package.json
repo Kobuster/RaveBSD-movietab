@@ -1,13 +1,13 @@
 {
   "name": "ravebsd",
   "version": "2.0.0",
-  "description": "Self-hosted book and audiobook meta-search",
+  "description": "Self-hosted book, audiobook and movie meta-search",
   "license": "Unlicense",
   "type": "module",
   "private": true,
   "scripts": {
     "start": "node src/server.js",
-    "test": "node test/syntax.test.mjs && node test/sources.test.mjs && node test/rename.test.mjs && node test/slum.test.mjs && node test/netguard.test.mjs && node test/zip.test.mjs && node test/persist.test.mjs && node test/torrents.test.mjs && node test/access.test.mjs",
+    "test": "node test/syntax.test.mjs && node test/sources.test.mjs && node test/rename.test.mjs && node test/slum.test.mjs && node test/netguard.test.mjs && node test/zip.test.mjs && node test/persist.test.mjs && node test/torrents.test.mjs && node test/access.test.mjs && node test/scrapers.test.mjs",
     "postinstall": "node scripts/setup-browser.mjs"
   },
   "engines": {

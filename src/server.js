@@ -10,7 +10,7 @@
 //   /browser/*                  the Verify view for Anna's Archive
 // With a password on, everything except /health, the session routes and the page files needs a session
 // cookie; /api/v1/search takes an X-API-Key instead.
-// Environment: PORT (8080), DATA_DIR (./data), BOOKS_DIR, AUDIOBOOKS_DIR, API_KEY, USER_AGENT_MODE, ZLIB_*, MOBILISM_*.
+// Environment: PORT (8080), DATA_DIR (./data), BOOKS_DIR, AUDIOBOOKS_DIR, MOVIES_DIR, SCRAPERS_DIR, API_KEY, USER_AGENT_MODE, ZLIB_*, MOBILISM_*.
 import http from 'node:http';
 import zlib from 'node:zlib';
 import net from 'node:net';
@@ -30,6 +30,7 @@ import { vpn, checkVpn, switchExit, vpnBlocks, onVpnChange } from './vpn.js';
 import { zipFolder, zipSize } from './zip.js';
 import { refreshSlum, slumSummary } from './slum.js';
 import { fetchPublic, readCapped } from './netguard.js';
+import { refreshScrapers, listScrapers, scraperProblems, USER_DIR as SCRAPERS_DIR } from './scrapers.js';
 
 const ROOT = path.join(path.dirname(fileURLToPath(import.meta.url)), '..', 'public');
 const RENAME_JS = path.join(path.dirname(fileURLToPath(import.meta.url)), 'rename.js');
@@ -84,13 +85,15 @@ const LIBRARIES = [
 ];
 
 async function libraryStatus() {
+    await refreshScrapers();
     const c = applyCreds();
     const annas = await annasStatus();
     const zlib = zlibStatus(), mob = mobilismStatus();
     const zlibLogin = !!(c.zlib && c.zlib.email && c.zlib.password);
     const mobLogin = !!(c.mobilism && c.mobilism.username && c.mobilism.password);
     const off = new Set(settings.sources.off);
-    const list = LIBRARIES.map(l => {
+    // Drop-in scrapers join the list with their own description and colour.
+    const list = [...LIBRARIES, ...listScrapers().map(s => ({ ...s, scraper: true }))].map(l => {
         let state = off.has(l.id) ? 'off' : 'ok';
         const h = sourceHealth[l.id];
         if (state === 'ok' && h) state = h.status === 'ok' ? 'ok' : h.status === 'timeout' ? 'slow' : h.status === 'unavailable' ? 'needsHuman' : 'error';
@@ -104,6 +107,7 @@ async function libraryStatus() {
         annas: { needsVerify: annas.needsVerify, browser: annas.browser, cookie: annas.configured, expired: annas.expired, mirror: (c.annas && c.annas.mirror) || '' },
         zlib: { login: zlibLogin, email: (c.zlib && c.zlib.email) || '', error: zlib.error || '', needsVerify: zlib.needsVerify },
         mobilism: { login: mobLogin, username: (c.mobilism && c.mobilism.username) || '', error: mob.error || '' },
+        scrapers: { dir: SCRAPERS_DIR, problems: scraperProblems() },
     };
 }
 
@@ -242,16 +246,16 @@ function viewSettings(me) {
     const all = publicSettings();
     // Setup only needs the folders, templates and qBittorrent's address.
     if (!settings.setupDone) {
-        const { ebookDir, audioDir, ebookTemplate, audioTemplate } = all.shelves;
-        return { access: { mode: all.access.mode, publicForced: all.access.publicForced }, shelves: { ebookDir, audioDir, ebookTemplate, audioTemplate }, qbit: { url: all.qbit.url } };
+        const { ebookDir, audioDir, movieDir, ebookTemplate, audioTemplate, movieTemplate } = all.shelves;
+        return { access: { mode: all.access.mode, publicForced: all.access.publicForced }, shelves: { ebookDir, audioDir, movieDir, ebookTemplate, audioTemplate, movieTemplate }, qbit: { url: all.qbit.url } };
     }
     if (me.role === 'admin') return all;
-    const { ebookTemplate, audioTemplate, rename, tidy } = all.shelves;
+    const { ebookTemplate, audioTemplate, movieTemplate, rename, tidy } = all.shelves;
     return {
         access: { mode: all.access.mode }, searching: all.searching, saving: all.saving, notify: all.notify, justLinks: all.justLinks,
         visitors: all.visitors, qbit: { enabled: all.qbit.enabled, directSlots: all.qbit.directSlots }, sources: { slum: all.sources.slum },
         system: { badges: all.system.badges }, vpn: { enabled: all.vpn.enabled, tellOnDrop: all.vpn.tellOnDrop }, storage: { lowSpaceGB: all.storage.lowSpaceGB },
-        shelves: { ebookTemplate, audioTemplate, rename, tidy },
+        shelves: { ebookTemplate, audioTemplate, movieTemplate, rename, tidy },
     };
 }
 // A shelf item as a non-admin sees it: its place inside the shelf, not on the disk.
@@ -259,7 +263,7 @@ function viewItem(i, me) {
     const { owners, fp, ...rest } = i;
     const out = { ...rest };
     if (me.role !== 'admin') {
-        const root = path.resolve(i.kind === 'audiobook' ? settings.shelves.audioDir : settings.shelves.ebookDir);
+        const root = path.resolve(i.kind === 'audiobook' ? settings.shelves.audioDir : i.kind === 'movie' ? settings.shelves.movieDir : settings.shelves.ebookDir);
         out.path = path.relative(root, path.resolve(i.path));
         // Family users see who added a book; visitors never see account names.
         if (out.addedBy) out.addedBy = me.role === 'visitor' ? { type: out.addedBy.type } : { type: out.addedBy.type, name: out.addedBy.name || '' };
@@ -353,7 +357,7 @@ async function api(req, res, url, me) {
     if (p === '/api/folders' && m === 'POST') {
         const b = await json(req);
         const out = {};
-        for (const k of ['ebookDir', 'audioDir']) out[k] = await jobs.freeSpace(path.resolve(String(b[k] || settings.shelves[k])));
+        for (const k of ['ebookDir', 'audioDir', 'movieDir']) out[k] = await jobs.freeSpace(path.resolve(String(b[k] || settings.shelves[k])));
         return send(res, 200, out);
     }
 
@@ -388,8 +392,8 @@ async function api(req, res, url, me) {
         });
         // Visitors see their own room; everyone else the disk's.
         if (me.role === 'visitor') return send(res, 200, { items, jobs: jobs.listJobs(me), mine: { used: jobs.visitorUsage(me.vid), quota: settings.visitors.quotaMB * 1e6, keepDays: settings.visitors.keepDays } });
-        const [e, a] = await Promise.all([jobs.freeSpace(path.resolve(settings.shelves.ebookDir)), jobs.freeSpace(path.resolve(settings.shelves.audioDir))]);
-        return send(res, 200, { items, jobs: jobs.listJobs(me), space: { ebook: e, audiobook: a }, lowSpace: me.role === 'admin' && jobs.lowSpace });
+        const [e, a, v] = await Promise.all([settings.shelves.ebookDir, settings.shelves.audioDir, settings.shelves.movieDir].map(d => jobs.freeSpace(path.resolve(d))));
+        return send(res, 200, { items, jobs: jobs.listJobs(me), space: { ebook: e, audiobook: a, movie: v }, lowSpace: me.role === 'admin' && jobs.lowSpace });
     }
     if (p === '/api/shelf/delete' && m === 'POST') { const b = await json(req); return send(res, 200, { deleted: await jobs.deleteItems((b.ids || []).map(String), me) }); }
     if ((mm = p.match(/^\/api\/shelf\/([a-f0-9]+)\/forget$/)) && m === 'POST') { jobs.forget(mm[1], me); return send(res, 200, { ok: true }); }
@@ -397,8 +401,10 @@ async function api(req, res, url, me) {
     if (p === '/api/stats') {
         if (m === 'DELETE') { clearStats(); return send(res, 200, { ok: true }); }
         const period = ['all', 'year', '30d'].includes(url.searchParams.get('period')) ? url.searchParams.get('period') : 'all';
-        const [e, a] = await Promise.all([jobs.freeSpace(path.resolve(settings.shelves.ebookDir)), jobs.freeSpace(path.resolve(settings.shelves.audioDir))]);
-        return send(res, 200, { enabled: settings.statsEnabled, period, ...statsFor(period), shelf: jobs.shelfBytes(), disk: e.total >= a.total ? e : a, sameDisk: e.total === a.total && Math.abs(e.free - a.free) < 1e9 });
+        const [e, a, v] = await Promise.all([settings.shelves.ebookDir, settings.shelves.audioDir, settings.shelves.movieDir].map(d => jobs.freeSpace(path.resolve(d))));
+        // The biggest of the disks the shelves are on (usually all three are the same one).
+        const disk = [e, a, v].sort((x, y) => (y.total || 0) - (x.total || 0))[0];
+        return send(res, 200, { enabled: settings.statsEnabled, period, ...statsFor(period), shelf: jobs.shelfBytes(), disk, sameDisk: [a, v].every(d => d.total === e.total && Math.abs(d.free - e.free) < 1e9) });
     }
 
     if (p === '/api/backup' && m === 'GET') {
@@ -712,6 +718,10 @@ server.on('error', e => {
 
 server.listen(PORT, () => {
     console.log(`RaveBSD ${VERSION} listening on :${PORT}`);
+    refreshScrapers(true).then(() => {
+        const s = listScrapers(), bad = scraperProblems();
+        console.log(`Scrapers: ${s.map(x => x.id).join(', ') || 'none'}${bad.length ? ` (${bad.length} skipped, see the admin panel)` : ''}. Yours go in ${SCRAPERS_DIR}.`);
+    }).catch(() => {});
     ensureBrowser().catch(() => {});
     if (settings.vpn.enabled) checkVpn();
     refreshSlum();

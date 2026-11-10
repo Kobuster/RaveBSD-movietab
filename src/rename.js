@@ -8,6 +8,8 @@ export const TOKENS = ['author', 'title', 'series', 'year', 'narrator', 'track',
 export const DEFAULT_TEMPLATES = {
     ebook: '{author}/{title} ({year}).{ext}',
     audiobook: '{author}/{title} ({year})/{track} - {title}.{ext}',
+    // The layout Jellyfin, Plex and Kodi expect: a folder per film, named like the file.
+    movie: '{title} ({year})/{title} ({year}).{ext}',
 };
 
 // Site tags and filler that sources add to names: "(z-lib.org)", "[libgen]", "www.example.com", underscores.

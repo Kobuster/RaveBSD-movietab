@@ -14,6 +14,9 @@ const ab = { author: 'Frank Herbert', title: 'Dune', year: '1965', ext: 'mp3', t
 assert.equal(applyTemplate(DEFAULT_TEMPLATES.audiobook, ab), 'Frank Herbert/Dune (1965)/003 - Dune.mp3');
 assert.equal(applyTemplate(DEFAULT_TEMPLATES.audiobook, { ...ab, trackCount: 9, track: 1 }), 'Frank Herbert/Dune (1965)/01 - Dune.mp3');
 assert.equal(singleFileAudiobook(DEFAULT_TEMPLATES.audiobook, { ...ab, ext: 'm4b' }), 'Frank Herbert/Dune (1965).m4b');
+// Movies: a folder per film, named like the file (what Jellyfin, Plex and Kodi expect).
+assert.equal(applyTemplate(DEFAULT_TEMPLATES.movie, { title: 'Nosferatu', year: '1922', author: 'F. W. Murnau', ext: 'MP4' }), 'Nosferatu (1922)/Nosferatu (1922).mp4');
+assert.equal(applyTemplate(DEFAULT_TEMPLATES.movie, { title: 'Nosferatu', ext: 'mkv' }), 'Nosferatu/Nosferatu.mkv');
 // Scraped values can never climb out of the folder or carry illegal characters.
 assert.equal(applyTemplate(DEFAULT_TEMPLATES.ebook, { author: '../../etc', title: 'a/b:c*?', ext: 'epub' }), 'etc/a-bc.epub');
 assert.equal(safeSegment('..'), '');

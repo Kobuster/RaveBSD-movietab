@@ -8,6 +8,21 @@ Search many free book and audiobook sources at once, from your own machine. Rave
 
 > **2.0 is a breaking update.** If you run 1.x, read [Upgrading from 1.x](#upgrading-from-1x) before you update. Updating the image alone is not enough.
 
+## This fork: movies
+
+This copy adds a third kind next to eBooks and Audiobooks: **Movies**. It searches, downloads to the server, renames (`{title} ({year})/{title} ({year}).{ext}`, the layout Jellyfin, Plex and Kodi read) and shelves films like books. Movie sources are **drop-in scrapers**: one `.js` file each, picked up by the next search without a restart.
+
+- Ships with three public-domain sources: Internet Archive (feature films and Prelinger), Wikimedia Commons and the Library of Congress. Their files are in `src/scrapers/`.
+- Your own go in `./scrapers` next to `compose.yaml`. Start from `src/scrapers/_template.js`; `src/scrapers/development-aide.md` explains the rest. A scraper can answer eBook or audiobook searches too.
+- Try one on its own at `/search/<id>?q=words&mode=movies`. Files that fail to load are listed in the admin panel under Libraries.
+- The published image has no movies, so this fork is always built here: `docker compose up -d --build` the first time, `./update.sh` after that (`./update.sh upstream` also merges the newest original RaveBSD).
+
+```
+mkdir data books audiobooks downloads movies scrapers
+cp .env.example .env
+docker compose up -d --build
+```
+
 ## Screenshots
 
 Click any screenshot to see it full size.

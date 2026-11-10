@@ -26,9 +26,13 @@
 //      answers), to LIBS in public/js/search.js (loading bar label) and SRC_INFO in public/js/settings.js.
 //      If its file links come later, add its display name to RESOLVABLE. Add a test for any parsing you wrote.
 // Search results never leave this server as links to fetch: downloads go by result id (src/jobs.js).
+//
+// Simpler for most new sources: a drop-in scraper file (src/scrapers.js, src/scrapers/development-aide.md). It needs
+// none of the steps above and is the only way to add movie sources.
 
 import { browserGet, browserFetch, browserAvailable, verifyWindowOpen } from './browser.js';
 import { slumOrder } from './slum.js';
+import { refreshScrapers, scrapersFor, getScraper } from './scrapers.js';
 
 const CORS = {
     'Access-Control-Allow-Origin':  '*',
@@ -150,6 +154,8 @@ const FORMAT_SCORE = {
     djvu: 15, pdf: 10, cbz: 5, cbr: 5,
     doc: 2, docx: 2, txt: 1,
     m4b: 35, mp3: 20, m4a: 20, flac: 15, aac: 15,
+    // Movies: formats most players open first.
+    mp4: 30, mkv: 28, m4v: 22, webm: 20, ogv: 10, avi: 10, mov: 8, mpeg: 8, mpg: 8,
 };
 
 // ── Helpers ────────────────────────────────────────────────────────────────
@@ -1637,6 +1643,54 @@ async function searchMobilism(query, mode) {
     } catch (e) { return unavailable(); }
 }
 
+// ── Drop-in scrapers ─────────────────────────────────────────────────────────
+// Files in src/scrapers/ and SCRAPERS_DIR (see src/scrapers.js). Each gets the same helpers the built-in
+// sources use, and its results are cleaned up here so a scraper cannot hand the page or the downloader
+// anything a built-in source could not.
+const str = (v, max) => (v == null ? '' : Array.isArray(v) ? v.filter(Boolean).join(', ') : String(v)).trim().slice(0, max);
+export function scraperCtx(s, mode) {
+    const ms = o => Math.min(s.timeout || 20e3, (o && o.ms) || 10e3);
+    const fail = (url, r) => new Error(`${new URL(url).host} answered ${r.status}`);
+    return {
+        mode,
+        get: (url, o = {}) => get(url, ms(o), o.headers || {}, o.init || {}),
+        async json(url, o = {}) { const r = await get(url, ms(o), { Accept: 'application/json', ...(o.headers || {}) }, o.init || {}); if (!r.ok) throw fail(url, r); return r.json(); },
+        async text(url, o = {}) { const r = await get(url, ms(o), o.headers || {}, o.init || {}); if (!r.ok) throw fail(url, r); return r.text(); },
+        strip, lengthText, parseSize: parseFilesizeBytes,
+        log: (...a) => console.log(`[${s.id}]`, ...a),
+    };
+}
+// Whatever came back becomes plain results: known fields in their expected types, the scraper's name as the
+// source, and the scraper's id so its resolve() can be found later. Extra fields stay for that resolve().
+export function normalizeScraped(s, list) {
+    if (!Array.isArray(list)) return [];
+    return list.filter(r => r && typeof r === 'object' && r.title).slice(0, 60).map(r => {
+        const out = { ...r };
+        delete out.id; delete out._mode; delete out._resolved; delete out.kind;
+        return Object.assign(out, {
+            title: str(r.title, 300), author: str(r.author, 300), year: str(r.year, 10), language: str(r.language, 40), length: str(r.length, 30),
+            format: str(r.format, 10).toLowerCase().replace(/^\./, ''), filesize: Math.max(0, Number(r.filesize) || 0),
+            source: s.name, _scraper: s.id,
+        });
+    });
+}
+function runScraper(s, q, mode) {
+    return Promise.resolve().then(() => s.search(q, scraperCtx(s, mode))).then(list => normalizeScraped(s, list), e => {
+        console.warn(`[${s.id}] search failed: ${(e && e.message) || e}`);
+        throw e;
+    });
+}
+async function resolveScraped(r, mode) {
+    const s = getScraper(r._scraper);
+    if (!s || !s.resolve) return;
+    try { await withDeadline(Promise.resolve().then(() => s.resolve(r, scraperCtx(s, mode))), RESOLVE_DEADLINE_MS, null); }
+    catch (e) { console.warn(`[${s.id}] resolve failed: ${(e && e.message) || e}`); }
+    cleanLinks(r);
+    r.filesize = Math.max(0, Number(r.filesize) || 0);
+    r.format = str(r.format, 10).toLowerCase().replace(/^\./, '');
+    r.length = str(r.length, 30);
+}
+
 // ── Merge, rank, deduplicate ────────────────────────────────────────────────
 
 // Result ids and the server-side store let the page ask for one result's direct link later
@@ -1657,10 +1711,13 @@ export const setSearchGate = fn => { searchBlocked = fn; };
 // How each source did in its most recent search: ok, unavailable, error or timeout. Shown in Settings.
 export const sourceHealth = {};
 export const RESOLVABLE = new Set(['Library Genesis', "Anna's Archive", 'RoyalLib', 'Internet Archive', 'AudiobookBay', 'AudiobooksBee']);
+// Drop-in scrapers with a resolve() find their file links later too.
+export const canResolve = r => RESOLVABLE.has(r.source) || !!(r._scraper && (getScraper(r._scraper) || {}).resolve);
 let idSeq = 0;
+// Links from a library's page or API become the page's links and the server's downloads: web addresses only.
+const cleanLinks = r => { for (const k of ['pageUrl', 'downloadUrl', 'detailUrl', 'directUrl', 'coverUrl', 'topicUrl']) if (r[k] && !isHttpUrl(r[k]) && !String(r[k]).startsWith('/dl/')) delete r[k]; };
 export const registerResult = (r, mode) => {
-    // Links from a library's page or API become the page's links and the server's downloads: web addresses only.
-    for (const k of ['pageUrl', 'downloadUrl', 'detailUrl', 'directUrl', 'coverUrl', 'topicUrl']) if (r[k] && !isHttpUrl(r[k]) && !String(r[k]).startsWith('/dl/')) delete r[k];
+    cleanLinks(r);
     if (!r.id) r.id = Date.now().toString(36) + (idSeq++).toString(36);
     if (mode) r._mode = mode;
     resultStore.delete(r.id);
@@ -1761,7 +1818,8 @@ export async function resolveOne(id) {
     if (!resolving.has(id)) {
         resolving.set(id, (async () => {
             const mode = r._mode || 'ebooks';
-            switch (r.source) {
+            if (r._scraper) await resolveScraped(r, mode);
+            else switch (r.source) {
                 case 'Library Genesis': if (r.md5) await resolveLibgenLinks([r], 1); break;
                 case "Anna's Archive": // most Anna's files are also on LibGen, which has instant links
                     if (r.md5) { const t = { md5: r.md5 }; await resolveLibgenLinks([t], 1); if (t.directUrl) { r.directUrl = t.directUrl; r.directFrom = 'LibGen'; } }
@@ -1802,21 +1860,27 @@ async function runFullSearch(query, mode, resolveTopN, env, onProgress, opts) {
     // With advanced search the user can pick sources, and unchosen ones never run.
     const jobs = [];
     const add = (name, applies, run) => { if (applies && !sourcesOff.has(name) && (!opts.sources.length || opts.sources.includes(name))) jobs.push({ name, fn: run, run: run(query) }); };
-    const ebooks = mode !== 'audiobooks', audio = !ebooks;
+    // The libraries written into this file are for books; movies come only from drop-in scrapers.
+    const ebooks = mode === 'ebooks', audio = mode === 'audiobooks', books = ebooks || audio;
+    await refreshScrapers();
     // LibGen has no audiobook section: in audiobook mode only actual audio files it happens to hold count.
-    add('libgen', true, q => searchLibgen(q, mode).then(rs => audio ? rs.filter(r => IA_AUDIO_EXTS.includes(String(r.format).toLowerCase())) : rs));
+    add('libgen', books, q => searchLibgen(q, mode).then(rs => audio ? rs.filter(r => IA_AUDIO_EXTS.includes(String(r.format).toLowerCase())) : rs));
     add('annas', ebooks, q => searchAnnas(q, mode));
-    add('archive', true, q => searchArchive(q, mode));
+    add('archive', books, q => searchArchive(q, mode));
     add('gutenberg', ebooks, q => searchGutenberg(q, mode));
     add('openstax', ebooks, q => searchOpenStax(q, mode));
     add('libretexts', ebooks, q => searchLibreTexts(q, mode));
     add('memoryoftheworld', ebooks, q => searchMemoryOfTheWorld(q, mode));
     add('royallib', ebooks, q => searchRoyalLib(q, mode));
     add('zlibrary', ebooks, q => searchZlibrary(q, mode));
-    add('mobilism', mobilismConfigured(), q => searchMobilism(q, mode));
+    add('mobilism', books && mobilismConfigured(), q => searchMobilism(q, mode));
     add('audiobookbay', audio, q => searchAudiobookBay(q));
     add('librivox', audio, q => searchLibriVox(q, mode));
     add('audiobooksbee', audio, q => searchAudiobooksBee(q));
+    const scrapers = scrapersFor(mode);
+    for (const s of scrapers) add(s.id, true, q => runScraper(s, q, mode));
+    // The page knows the built-in libraries' names; drop-in ones are named here.
+    const labels = Object.fromEntries(scrapers.map(s => [s.id, s.name]));
 
     // Streaming callers (the page) get results as each source finishes and ask for direct links
     // afterwards through /resolve. Plain callers (the JSON API) wait for direct links before the reply.
@@ -1831,10 +1895,11 @@ async function runFullSearch(query, mode, resolveTopN, env, onProgress, opts) {
         libgen: rs => resolveLibgenLinks(rs, resolveTopN), royallib: rs => resolveRoyalLibLinks(rs, resolveTopN),
         archive: rs => resolveArchiveLinks(rs, mode, resolveTopN), audiobookbay: rs => resolveAbbMagnets(rs), audiobooksbee: rs => resolveAudiobooksBeeLinks(rs),
     };
+    for (const s of scrapers) if (s.resolve) RESOLVERS[s.id] = rs => Promise.allSettled(rs.slice(0, resolveTopN || 8).map(r => resolveScraped(r, mode)));
     const resolveJobs = [];
     const resolveSoon = (name, v) => { if (!streaming && v.length && RESOLVERS[name]) resolveJobs.push(RESOLVERS[name](v).catch(() => {})); };
 
-    if (onProgress) onProgress({ sources: jobs.map(j => j.name) });
+    if (onProgress) onProgress({ sources: jobs.map(j => j.name), labels });
     const settled = await Promise.allSettled(jobs.map(j => {
         let reported = false;
         const report = (v, count, status) => {
@@ -1870,25 +1935,27 @@ async function runFullSearch(query, mode, resolveTopN, env, onProgress, opts) {
         openstax: count('openstax'), libretexts: count('libretexts'), memoryoftheworld: count('memoryoftheworld'),
         royallib: count('royallib'), audiobookbay: count('audiobookbay'), librivox: count('librivox'),
         audiobooksbee: count('audiobooksbee'), zlibrary: count('zlibrary'), mobilism: count('mobilism'),
+        ...Object.fromEntries(scrapers.map(s => [s.id, count(s.id)])),
     });
 
     if (streaming) {
         finished = true;
         jobs.forEach(j => { if (!got[j.name]) got[j.name] = norm(j.name, byName[j.name] || []); });
-        return { results: snapshot(), meta: meta() };
+        return { results: snapshot(), meta: meta(), labels };
     }
 
     // The lookups started by resolveSoon get RESOLVE_DEADLINE_MS more once every search is in, as before.
     await withDeadline(Promise.allSettled(resolveJobs), RESOLVE_DEADLINE_MS, null);
     jobs.forEach(j => { got[j.name] = norm(j.name, byName[j.name] || []); });
-    return { results: snapshot(), meta: meta() };
+    return { results: snapshot(), meta: meta(), labels };
 }
 
 // ── Search cache ────────────────────────────────────────────────────────────
 // /search/all answers are kept in memory for 10 minutes (see the caches shim in src/server.js).
 const SEARCH_EDGE_TTL_S = 600;
 // LibGen is the main source and sometimes fails for a moment. If it returned nothing, cache for 1 minute only.
-const degradedTtl = meta => (meta && meta.libgen > 0 ? SEARCH_EDGE_TTL_S : 60);
+// Movie searches never ask LibGen, so they keep the full time.
+const degradedTtl = (meta, mode) => (mode === 'movies' || (meta && meta.libgen > 0) ? SEARCH_EDGE_TTL_S : 60);
 const searchCacheKey = (mode, query, opts) =>
     'https://edge-cache.internal/search/all?mode=' + encodeURIComponent(mode) + '&q=' + encodeURIComponent((query || '').trim().toLowerCase().slice(0, 200))
     + (optsKey(opts) ? '&o=' + encodeURIComponent(optsKey(opts)) : '')
@@ -1899,8 +1966,8 @@ const searchCacheKey = (mode, query, opts) =>
 // with the streamed search; links=direct and the libraries count are applied on the way out.
 async function plainSearch(url, mode, query, opts, env, ctx) {
     const res = await withEdgeCache(searchCacheKey(mode, query, opts), ctx, SEARCH_EDGE_TTL_S, async () => {
-        const { results, meta } = await runFullSearch(query, mode, undefined, env, undefined, opts);
-        return [ok({ source: 'all', results, meta }), results.length > 0 && degradedTtl(meta)];
+        const { results, meta, labels } = await runFullSearch(query, mode, undefined, env, undefined, opts);
+        return [ok({ source: 'all', results, meta, labels }), results.length > 0 && degradedTtl(meta, mode)];
     });
     const out = await res.json();
     keepResults(out.results, mode);
@@ -1931,7 +1998,8 @@ export default {
 
         // q, or title and author given separately (advanced search / API callers)
         const query = (url.searchParams.get('q') || [url.searchParams.get('title'), url.searchParams.get('author')].filter(Boolean).join(' ')).trim().slice(0, 300);
-        const mode  = url.searchParams.get('mode') === 'audiobooks' || /^audio/.test(url.searchParams.get('kind') || '') ? 'audiobooks' : 'ebooks';
+        const kindParam = url.searchParams.get('kind') || '', modeParam = url.searchParams.get('mode');
+        const mode  = modeParam === 'audiobooks' || /^audio/.test(kindParam) ? 'audiobooks' : modeParam === 'movies' || /^(movie|film)/.test(kindParam) ? 'movies' : 'ebooks';
         const opts  = parseOpts(url);
 
         if (!query) return err('No query provided', 400);
@@ -1999,6 +2067,21 @@ export default {
             if (path === '/search/zlibrary') return okR(env, 'zlibrary', await searchZlibrary(query, mode));
             if (path === '/search/mobilism') return okR(env, 'mobilism', await searchMobilism(query, mode));
 
+            // One drop-in scraper on its own, with its file links looked up (handy while writing one).
+            const one = path.match(/^\/search\/([a-z0-9]+)$/);
+            if (one && one[1] !== 'all') {
+                await refreshScrapers();
+                const s = getScraper(one[1]);
+                if (s) {
+                    const m = s.kinds.includes(mode) ? mode : s.kinds[0];
+                    const results = await runScraper(s, query, m);
+                    results.forEach(r => registerResult(r, m));
+                    if (s.resolve) await withDeadline(Promise.allSettled(results.slice(0, 8).map(r => resolveScraped(r, m))), RESOLVE_DEADLINE_MS, null);
+                    results.forEach(r => { r._resolved = true; decorate(r); });
+                    return okR(env, s.id, results);
+                }
+            }
+
             if (path === '/search/all') {
                 // stream=1 sends one JSON object per line: progress events, then a final {final: {...}} line
                 // with the full result. The page uses it to show results as each source finishes.
@@ -2013,9 +2096,9 @@ export default {
                     const send = o => writer.write(enc.encode(JSON.stringify(o) + '\n')).catch(() => {});
                     ctx.waitUntil((async () => {
                         try {
-                            const { results, meta } = await runFullSearch(query, mode, undefined, env, send, opts);
-                            await send({ final: { source: 'all', results, meta } });
-                            if (results.length > 0) edgePut(key, ctx, degradedTtl(meta), ok({ source: 'all', results, meta }));
+                            const { results, meta, labels } = await runFullSearch(query, mode, undefined, env, send, opts);
+                            await send({ final: { source: 'all', results, meta, labels } });
+                            if (results.length > 0) edgePut(key, ctx, degradedTtl(meta, mode), ok({ source: 'all', results, meta, labels }));
                         } catch (e) {
                             await send({ error: String(e && e.message || e) });
                         } finally { writer.close().catch(() => {}); }

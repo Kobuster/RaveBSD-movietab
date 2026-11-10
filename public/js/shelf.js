@@ -55,7 +55,7 @@ function drawBanners() {
     let out = '';
     if (st.vpn && st.vpn.enabled && s.vpn.tellOnDrop && st.vpn.up === false) out += `<div class="banner coral" role="alert"><span class="grow">The VPN tunnel is down${st.vpn.blocking ? ', so searching and downloading are paused until it is back' : ''}. <span style="font-weight:500;color:var(--text2)">${esc(st.vpn.error || '')}</span></span><a class="btn outline sm" href="/admin#vpn">VPN settings</a></div>`;
     if (st.lowSpace && data.space) {
-        const free = Math.min(data.space.ebook.free || Infinity, data.space.audiobook.free || Infinity);
+        const free = Math.min(...Object.values(data.space).map(x => x.free || Infinity));
         out += `<div class="banner coral"><span class="grow">Space is running low: ${size(free)} free. <span style="font-weight:500;color:var(--text2)">Delete books you have saved elsewhere, or raise the limit in the admin panel.</span></span><a class="btn outline sm" href="/admin#storage">Storage settings</a></div>`;
     }
     if (data.mine) {
@@ -83,9 +83,9 @@ function steps(j) {
     return `<ol class="steps" aria-label="Steps">${ring(0, 'Download')}<li class="line ${at > 0 ? 'done' : ''}" aria-hidden="true"></li>${ring(1, 'Rename')}<li class="line" aria-hidden="true"></li>${ring(2, 'On the shelf')}</ol>`;
 }
 const fileAsFor = j => {
-    const s = app.settings.shelves, dir = (j.kind === 'audiobook' ? s.audioDir : s.ebookDir) || '';
+    const s = app.settings.shelves, dir = (j.kind === 'audiobook' ? s.audioDir : j.kind === 'movie' ? s.movieDir : s.ebookDir) || '';
     const b = { author: j.author, title: j.title, year: j.year, series: j.series, narrator: j.narrator, ext: j.format };
-    return (dir ? dir.replace(/\/+$/, '') + '/' : '') + (j.kind === 'audiobook' ? singleFileAudiobook(s.audioTemplate, b).replace(/\.[^.]*$/, '/') : applyTemplate(s.ebookTemplate, b, { tidy: s.tidy }));
+    return (dir ? dir.replace(/\/+$/, '') + '/' : '') + (j.kind === 'audiobook' ? singleFileAudiobook(s.audioTemplate, b).replace(/\.[^.]*$/, '/') : applyTemplate(j.kind === 'movie' ? s.movieTemplate : s.ebookTemplate, b, { tidy: s.tidy }));
 };
 // Phone: a compact card with a one-line status and the steps as words.
 function phoneJob(j, x, cover) {
@@ -140,10 +140,11 @@ function drawSide() {
             <b class="big">${!qb ? 'Checking…' : qb.ok ? 'Connected and ready' : 'Could not reach it'}</b>
             <span class="mono">${priv(esc(host))}<br>category ${esc(s.qbit.category)}<br>${priv(esc(s.qbit.mapFrom) + ' ⇄ ' + esc(s.qbit.mapTo))}</span>
             ${vpn}<a class="btn outline-ink xs" href="/admin#qbittorrent" style="align-self:flex-start">Edit</a></div>`;
-    const free = Math.min(data.space.ebook.free || Infinity, data.space.audiobook.free || Infinity);
+    const free = Math.min(...Object.values(data.space).map(x => x.free || Infinity));
     patchHtml(el, qcard + `<div class="card sidecard"><b>Filed on the server as</b>
         <span class="tpl" style="color:#5EEAB4">${priv(esc(s.shelves.ebookDir.replace(/\/+$/, '')))}/${esc(s.shelves.ebookTemplate)}</span>
         <span class="tpl" style="color:#FF9FE8">${priv(esc(s.shelves.audioDir.replace(/\/+$/, '')))}/${esc(s.shelves.audioTemplate.split('/').slice(0, -1).join('/') + '/')}</span>
+        ${s.shelves.movieDir ? `<span class="tpl" style="color:#8FD0FF">${priv(esc(s.shelves.movieDir.replace(/\/+$/, '')))}/${esc(s.shelves.movieTemplate)}</span>` : ''}
         <span style="font-size:13px;color:var(--text2)">${free < Infinity ? size(free) + ' free' : ''}</span>
         <a href="/admin#shelves" class="u" style="color:var(--paper)">Change naming</a></div>`);
 }
@@ -151,7 +152,7 @@ function drawSide() {
 // ── On the shelf ─────────────────────────────────────────────────────────────
 const recentlySaved = i => i.savedAt && Date.now() - i.savedAt < 10 * 60e3;
 function itemRow(i) {
-    const colour = i.kind === 'audiobook' ? '#FF9FE8' : paletteFor(i).c[0];
+    const colour = i.kind === 'audiobook' ? '#FF9FE8' : i.kind === 'movie' ? '#8FD0FF' : paletteFor(i).c[0];
     const box = selecting && !i.failed ? `<button type="button" class="cbox" role="checkbox" aria-checked="${picked.has(i.id)}" aria-label="Select ${esc(i.title)}" data-act="pick" data-id="${esc(i.id)}">${icon('check', 16, 3)}</button>` : '';
     const more = `<span class="menuwrap"><button type="button" class="dots" aria-label="More for ${esc(i.title)}" title="More" aria-haspopup="menu" aria-expanded="false" data-act="menu" data-id="${esc(i.id)}">${icon('more', 18)}</button></span>`;
     if (i.failed && isPhone()) return `<div class="item ph"><div class="iph"><span class="bar14" aria-hidden="true" style="background:#FF8A65"></span><div class="it"><b>${esc(i.title)}</b><span class="failtxt">${esc(/stale/i.test(i.error || '') ? 'The link went stale before the file started. Trying again gets a fresh one.' : i.error || 'The download failed.')}</span></div>${more}</div><button type="button" class="btn outline" data-act="retry" data-id="${esc(i.id)}" style="height:48px">Try again</button></div>`;
@@ -272,16 +273,16 @@ function pie(slices, r, sw, cx, cy) {
 }
 function storageCard(s) {
     const total = s.disk.total || 0, free = s.disk.free || 0;
-    const eb = s.shelf.ebook, au = s.shelf.audiobook, other = Math.max(0, total - free - eb - au);
-    const sl = total ? [[eb / total, '#4B63FF'], [au / total, '#FF4FD8'], [other / total, '#8E9BA8'], [free / total, '#FFFFFF']] : [];
-    const books = s.ebook + s.audio;
+    const eb = s.shelf.ebook, au = s.shelf.audiobook, mv = s.shelf.movie || 0, other = Math.max(0, total - free - eb - au - mv);
+    const sl = total ? [[eb / total, '#4B63FF'], [au / total, '#FF4FD8'], [mv / total, '#2EE6F6'], [other / total, '#8E9BA8'], [free / total, '#FFFFFF']] : [];
+    const books = s.ebook + s.audio + (s.movie || 0);
     const months = s.last30Bytes > 0 ? Math.floor(free / s.last30Bytes) : 0;
     const pace = s.last30Bytes > 0 ? `At this pace the disk has room for about ${months > 120 ? 'ten years or more' : plural(months, 'more month')} of reading.` : 'Nothing was downloaded in the last 30 days.';
-    const legend = [['#4B63FF', 'eBooks', eb], ['#FF4FD8', 'Audiobooks', au], ['#8E9BA8', 'Everything else', other], ['#FFFFFF', 'Free', free]];
+    const legend = [['#4B63FF', 'eBooks', eb], ['#FF4FD8', 'Audiobooks', au], ...(mv || s.movie ? [['#2EE6F6', 'Movies', mv]] : []), ['#8E9BA8', 'Everything else', other], ['#FFFFFF', 'Free', free]];
     return `<div class="stat" style="flex:1 1 560px;background:linear-gradient(160deg,#C4F5E1,#7DDFC0);gap:16px">
         <span class="label" style="color:#0B5E43">Storage</span>
         <div style="display:flex;flex-wrap:wrap;align-items:center;justify-content:center;gap:18px 28px">
-        <svg role="img" aria-label="Hard disk: ${size(free)} free of ${size(total)}. eBooks ${size(eb) || '0'}, audiobooks ${size(au) || '0'}, everything else ${size(other)}" viewBox="0 0 220 170" width="236" height="182" style="flex:none;filter:drop-shadow(0 8px 14px rgba(11,74,54,0.35))">
+        <svg role="img" aria-label="Hard disk: ${size(free)} free of ${size(total)}. eBooks ${size(eb) || '0'}, audiobooks ${size(au) || '0'}, movies ${size(mv) || '0'}, everything else ${size(other)}" viewBox="0 0 220 170" width="236" height="182" style="flex:none;filter:drop-shadow(0 8px 14px rgba(11,74,54,0.35))">
           <defs><radialGradient id="platd" cx="50%" cy="40%" r="60%"><stop offset="0" stop-color="#F3F5F9"/><stop offset="1" stop-color="#C3CAD6"/></radialGradient></defs>
           <rect x="2" y="2" width="216" height="166" rx="14" fill="#14123A"/><rect x="8" y="8" width="204" height="154" rx="10" fill="#1F1D4D" stroke="rgba(255,255,255,0.16)"/>
           <circle cx="17" cy="17" r="3.5" fill="#0B0A24"/><circle cx="203" cy="17" r="3.5" fill="#0B0A24"/><circle cx="17" cy="153" r="3.5" fill="#0B0A24"/><circle cx="203" cy="153" r="3.5" fill="#0B0A24"/>
@@ -295,21 +296,22 @@ function storageCard(s) {
           <div style="display:flex;flex-wrap:wrap;align-items:baseline;gap:6px 12px"><span style="font-size:60px;font-weight:800;letter-spacing:-0.035em;line-height:1">${size(free) || '0 GB'}</span><span style="font-size:20px;font-weight:700">free of ${size(total)}</span></div>
           <div class="legend">${legend.map(([c, l, v]) => `<span><span class="sw" style="background:${c};${c === '#FFFFFF' ? 'box-shadow:inset 0 0 0 2px rgba(20,18,58,0.3)' : ''}"></span>${l} <span class="m" style="color:#0B4A36">${size(v) || '0 KB'}</span></span>`).join('')}</div>
         </div></div>
-        <span style="font-size:14px;line-height:1.5;color:#0B4A36">Your shelf takes up ${size(eb + au) || 'nothing yet'}${books ? ` across ${plural(books, 'book')} downloaded` : ''}. ${pace}</span></div>`;
+        <span style="font-size:14px;line-height:1.5;color:#0B4A36">Your shelf takes up ${size(eb + au + mv) || 'nothing yet'}${books ? ` across ${plural(books, 'download')}` : ''}. ${pace}</span></div>`;
 }
 function downloadsCard(s) {
-    const total = s.ebook + s.audio, saved = Math.min(total, s.saved);
-    const split = total ? 134 * (s.audio / total) : 0;
+    const mv = s.movie || 0, total = s.ebook + s.audio + mv, saved = Math.min(total, s.saved);
+    // Bands from the top: audiobooks, movies, eBooks.
+    const split = total ? 134 * (s.audio / total) : 0, split2 = total ? 134 * ((s.audio + mv) / total) : 0;
     return `<div class="stat" style="flex:1 1 300px;background:linear-gradient(160deg,#E2D8FF,#B7A4FF)">
         <span class="label" style="color:#3B2A80">Downloaded to the server</span>
         <div style="display:flex;align-items:center;gap:16px">
-        <svg role="img" aria-label="Downloaded: ${plural(s.ebook, 'eBook')} and ${plural(s.audio, 'audiobook')}" viewBox="0 0 120 134" width="134" height="150" style="flex:none">
+        <svg role="img" aria-label="Downloaded: ${plural(s.ebook, 'eBook')}, ${plural(s.audio, 'audiobook')} and ${plural(mv, 'movie')}" viewBox="0 0 120 134" width="134" height="150" style="flex:none">
           <defs><mask id="dlmaskd" maskUnits="userSpaceOnUse" x="0" y="0" width="120" height="134"><g fill="#fff" stroke="#fff" stroke-linejoin="round" stroke-width="9"><polygon points="51,10.5 69,10.5 69,70 92.4,70 60,97 27.6,70 51,70"/><rect x="26.2" y="122.5" width="67.6" height="1" rx="0.5"/></g></mask></defs>
           <g mask="url(#dlmaskd)"><rect x="0" y="0" width="120" height="134" fill="rgba(255,255,255,0.55)"/>
-          ${total ? `<rect data-rise x="0" y="${split.toFixed(1)}" width="120" height="${(134 - split).toFixed(1)}" fill="#4B63FF"/><rect data-rise x="0" y="0" width="120" height="${split.toFixed(1)}" fill="#FF4FD8"/>${s.audio && s.ebook ? `<rect data-rise x="0" y="${(split - 0.9).toFixed(1)}" width="120" height="1.8" fill="#FFFFFF"/>` : ''}` : ''}</g></svg>
+          ${total ? `<rect data-rise x="0" y="${split2.toFixed(1)}" width="120" height="${(134 - split2).toFixed(1)}" fill="#4B63FF"/><rect data-rise x="0" y="${split.toFixed(1)}" width="120" height="${(split2 - split).toFixed(1)}" fill="#2EE6F6"/><rect data-rise x="0" y="0" width="120" height="${split.toFixed(1)}" fill="#FF4FD8"/>${s.audio && (s.ebook || mv) ? `<rect data-rise x="0" y="${(split - 0.9).toFixed(1)}" width="120" height="1.8" fill="#FFFFFF"/>` : ''}${mv && s.ebook ? `<rect data-rise x="0" y="${(split2 - 0.9).toFixed(1)}" width="120" height="1.8" fill="#FFFFFF"/>` : ''}` : ''}</g></svg>
         <div style="flex:1;min-width:0;display:flex;flex-direction:column;gap:8px">
           <span class="big">${total}</span>
-          <div class="legend" style="font-size:14px;gap:4px"><span><span class="sw" style="background:#4B63FF"></span>${plural(s.ebook, 'eBook')}</span><span><span class="sw" style="background:#FF4FD8"></span>${plural(s.audio, 'audiobook')}</span></div>
+          <div class="legend" style="font-size:14px;gap:4px"><span><span class="sw" style="background:#4B63FF"></span>${plural(s.ebook, 'eBook')}</span><span><span class="sw" style="background:#FF4FD8"></span>${plural(s.audio, 'audiobook')}</span>${mv ? `<span><span class="sw" style="background:#2EE6F6"></span>${plural(mv, 'movie')}</span>` : ''}</div>
           <div style="height:1px;margin:4px 0;background:rgba(20,18,58,0.2)"></div>
           <div style="display:flex;align-items:baseline;gap:10px"><span style="font-size:28px;font-weight:800;letter-spacing:-0.03em;line-height:1">${saved}</span><span style="font-size:13px;font-weight:600;color:#2E2166">saved to a device</span></div>
           <div style="display:flex;align-items:baseline;gap:10px"><span style="font-size:28px;font-weight:800;letter-spacing:-0.03em;line-height:1">${total - saved}</span><span style="font-size:13px;font-weight:600;color:#2E2166">only on the server</span></div>
