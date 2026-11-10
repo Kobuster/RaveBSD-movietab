@@ -1,0 +1,31 @@
+# VPN: everything RaveBSD sends out (searches, downloads, DNS) leaves through Mullvad, via Gluetun.
+# If the tunnel drops, Gluetun's firewall blocks RaveBSD's traffic instead of letting it out unprotected.
+# Secrets live in .env (WIREGUARD_PRIVATE_KEY, WIREGUARD_ADDRESSES, GLUETUN_API_KEY), never in this file.
+services:
+  gluetun:
+    image: qmcgaw/gluetun
+    cap_add:
+      - NET_ADMIN
+    devices:
+      - /dev/net/tun:/dev/net/tun
+    environment:
+      VPN_SERVICE_PROVIDER: mullvad
+      VPN_TYPE: wireguard
+      WIREGUARD_PRIVATE_KEY: ${WIREGUARD_PRIVATE_KEY:?set WIREGUARD_PRIVATE_KEY in .env}
+      WIREGUARD_ADDRESSES: ${WIREGUARD_ADDRESSES:?set WIREGUARD_ADDRESSES in .env}
+      SERVER_COUNTRIES: ${VPN_COUNTRIES:-Sweden}
+      # RaveBSD reads the tunnel's state from Gluetun's control server (admin panel, VPN tunnel).
+      HTTP_CONTROL_SERVER_AUTH_DEFAULT_ROLE: '{"auth":"apikey","apikey":"${GLUETUN_API_KEY:?set GLUETUN_API_KEY in .env}"}'
+      TZ: Europe/Oslo
+    # RaveBSD's page is reached through Gluetun now, still only on this machine.
+    ports:
+      - "${PORT:-8080}:8080"
+    restart: unless-stopped
+
+  ravebsd:
+    network_mode: "service:gluetun"
+    ports: !reset []
+    depends_on:
+      gluetun:
+        condition: service_started
+        restart: true
