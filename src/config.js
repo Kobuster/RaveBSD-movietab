@@ -5,7 +5,8 @@
 // there, with the same type. SECRET keys are write-only, the page never gets them back.
 import fs from 'node:fs';
 import path from 'node:path';
-import { DEFAULT_TEMPLATES, primaryAuthor } from './rename.js';
+import { primaryAuthor } from './rename.js';
+import { KIND_LIST, MODES } from './kinds.js';
 
 export const DATA = process.env.DATA_DIR || path.join(process.cwd(), 'data');
 const SETTINGS_FILE = path.join(DATA, 'settings.json');
@@ -64,10 +65,9 @@ export const DEFAULT_LINKS = {
 };
 const toLinks = list => list.map(([name, url]) => ({ name, url }));
 
-// Docker sets these to /books, /audiobooks and /movies. Outside Docker the shelves live next to the data.
-const BOOKS_DIR = process.env.BOOKS_DIR || path.join(DATA, 'books');
-const AUDIO_DIR = process.env.AUDIOBOOKS_DIR || path.join(DATA, 'audiobooks');
-const MOVIES_DIR = process.env.MOVIES_DIR || path.join(DATA, 'movies');
+// Docker sets each kind's folder (BOOKS_DIR=/books, MOVIES_DIR=/movies, GAMES_DIR=/games, ...). Outside Docker the
+// shelves live next to the data.
+const shelfDefaults = Object.fromEntries(KIND_LIST.flatMap(k => [[k.dirKey, process.env[k.env] || path.join(DATA, k.folder)], [k.tplKey, k.template]]));
 
 export const DEFAULTS = {
     setupDone: false,
@@ -78,13 +78,13 @@ export const DEFAULTS = {
     access: { mode: 'private' },
     // Public instances: what one visitor may keep on the server, and for how long.
     visitors: { downloads: true, quotaMB: 2048, keepDays: 7, totalMB: 20000 },
-    searching: { view: 'shelf', links: 'direct', length: 'unabridged' },
+    // hidden: kinds left out of the search menu (their libraries still work through the API).
+    searching: { view: 'shelf', links: 'direct', length: 'unabridged', hidden: [] },
     saving: { allow: true, auto: false },
     storage: { removeAfterSaved: false, lowSpaceGB: 5 },
     notify: { onShelf: true, lowSpace: true },
     shelves: {
-        ebookDir: BOOKS_DIR, audioDir: AUDIO_DIR, movieDir: MOVIES_DIR,
-        ebookTemplate: DEFAULT_TEMPLATES.ebook, audioTemplate: DEFAULT_TEMPLATES.audiobook, movieTemplate: DEFAULT_TEMPLATES.movie,
+        ...shelfDefaults,
         rename: true, tidy: true, keepMoved: true, duplicate: 'skip',
     },
     qbit: {
@@ -93,8 +93,9 @@ export const DEFAULTS = {
     },
     vpn: { enabled: false, stopOnDrop: true, tellOnDrop: true, controlUrl: 'http://localhost:8000', apiKey: '' },
     system: { badges: true },
-    sources: { off: [], slum: true },
-    justLinks: { ebooks: toLinks(DEFAULT_LINKS.ebooks), audiobooks: toLinks(DEFAULT_LINKS.audiobooks), movies: toLinks(DEFAULT_LINKS.movies) },
+    // general: run qBittorrent search plugins that only list "all" (general torrent search) in every kind of search.
+    sources: { off: [], slum: true, general: false },
+    justLinks: Object.fromEntries(MODES.map(m => [m, toLinks(DEFAULT_LINKS[m] || [])])),
 };
 // Allowed values for the keys that are a choice.
 const CHOICES = {
@@ -205,7 +206,8 @@ export function patchSettings(patch) {
         if (name === 'visitors.quotaMB') v = Math.min(1e7, Math.max(1, Math.round(v)));
         if (name === 'visitors.keepDays') v = Math.min(365, Math.max(1, Math.round(v)));
         if (name === 'visitors.totalMB') v = Math.min(1e8, Math.max(1, Math.round(v)));
-        if (name === 'sources.off') v = v.filter(x => typeof x === 'string').slice(0, 50);
+        if (name === 'sources.off') v = v.filter(x => typeof x === 'string').slice(0, 200);
+        if (name === 'searching.hidden') v = [...new Set(v.filter(x => MODES.includes(x)))];
         if (name.startsWith('justLinks.')) v = v.filter(l => l && typeof l.name === 'string' && /^https?:\/\/[^\s]+$/i.test(l.url || '') && l.url.includes('{q}'))
             .slice(0, 100).map(l => ({ name: l.name.trim().slice(0, 60), url: l.url.trim().slice(0, 1000) }));
         if (JSON.stringify(target[key]) === JSON.stringify(v)) return;
@@ -240,8 +242,12 @@ export function publicSettings() {
 }
 
 // ── Stats: counts only, per day, never sent anywhere ─────────────────────────
-// days["2026-10-12"] = { ebook, audio, movie, saved, bytes: {ebook, audio, movie}, fmt: {epub: n}, authors: {name: n} }
-// Days counted before movies existed have no movie keys; they count as 0.
+// days["2026-10-12"] = { ebook, audio, movie, game, ..., saved, bytes: {ebook, audio, ...}, fmt: {epub: n}, authors: {name: n} }
+// One count per kind (audiobooks are counted as "audio", as before). Days counted before a kind existed lack its
+// keys; they count as 0.
+export const statKey = kind => (kind === 'audiobook' ? 'audio' : KIND_LIST.some(k => k.kind === kind) ? kind : 'ebook');
+const STAT_KEYS = KIND_LIST.map(k => statKey(k.kind));
+const newDay = () => ({ ...Object.fromEntries(STAT_KEYS.map(k => [k, 0])), saved: 0, bytes: Object.fromEntries(STAT_KEYS.map(k => [k, 0])), fmt: {}, authors: {} });
 export let stats = { days: {} };
 try {
     const s = readJson(STATS_FILE);
@@ -252,8 +258,8 @@ const saveStats = () => writeJson(STATS_FILE, stats);
 export function countDownload({ kind, format, bytes, author }) {
     if (!settings.statsEnabled) return;
     const day = new Date().toISOString().slice(0, 10);
-    const d = stats.days[day] || (stats.days[day] = { ebook: 0, audio: 0, movie: 0, saved: 0, bytes: { ebook: 0, audio: 0, movie: 0 }, fmt: {}, authors: {} });
-    const k = kind === 'audiobook' ? 'audio' : kind === 'movie' ? 'movie' : 'ebook';
+    const d = stats.days[day] || (stats.days[day] = newDay());
+    const k = statKey(kind);
     d[k] = (d[k] || 0) + 1;
     d.bytes[k] = (d.bytes[k] || 0) + Math.max(0, Number(bytes) || 0);
     const f = String(format || '').toLowerCase();
@@ -265,7 +271,7 @@ export function countDownload({ kind, format, bytes, author }) {
 export function countSaved() {
     if (!settings.statsEnabled) return;
     const day = new Date().toISOString().slice(0, 10);
-    const d = stats.days[day] || (stats.days[day] = { ebook: 0, audio: 0, movie: 0, saved: 0, bytes: { ebook: 0, audio: 0, movie: 0 }, fmt: {}, authors: {} });
+    const d = stats.days[day] || (stats.days[day] = newDay());
     d.saved++; saveStats();
 }
 export function clearStats() { stats = { days: {} }; saveStats(); }
@@ -275,11 +281,11 @@ export function restoreStats(s) { if (s && s.days && typeof s.days === 'object')
 export function statsFor(period) {
     const since = period === 'year' ? new Date().getFullYear() + '-01-01'
         : period === '30d' ? new Date(Date.now() - 30 * 864e5).toISOString().slice(0, 10) : '';
-    const t = { ebook: 0, audio: 0, movie: 0, saved: 0, bytes: { ebook: 0, audio: 0, movie: 0 }, fmt: {}, authors: {} };
+    const t = newDay();
     for (const [day, d] of Object.entries(stats.days)) {
         if (day < since) continue;
-        t.ebook += d.ebook; t.audio += d.audio; t.movie += d.movie || 0; t.saved += d.saved;
-        t.bytes.ebook += d.bytes.ebook; t.bytes.audio += d.bytes.audio; t.bytes.movie += d.bytes.movie || 0;
+        for (const k of STAT_KEYS) { t[k] += d[k] || 0; t.bytes[k] += (d.bytes && d.bytes[k]) || 0; }
+        t.saved += d.saved || 0;
         for (const [k, n] of Object.entries(d.fmt)) t.fmt[k] = (t.fmt[k] || 0) + n;
         for (const [k, n] of Object.entries(d.authors)) t.authors[k] = (t.authors[k] || 0) + n;
     }
@@ -287,6 +293,6 @@ export function statsFor(period) {
     delete t.authors;
     // Bytes per day over the last 30 days, for the "at this pace" note on the storage card.
     const monthAgo = new Date(Date.now() - 30 * 864e5).toISOString().slice(0, 10);
-    t.last30Bytes = Object.entries(stats.days).filter(([day]) => day >= monthAgo).reduce((s, [, d]) => s + d.bytes.ebook + d.bytes.audio + (d.bytes.movie || 0), 0);
+    t.last30Bytes = Object.entries(stats.days).filter(([day]) => day >= monthAgo).reduce((s, [, d]) => s + STAT_KEYS.reduce((n, k) => n + ((d.bytes && d.bytes[k]) || 0), 0), 0);
     return t;
 }

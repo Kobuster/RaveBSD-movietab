@@ -2,7 +2,8 @@
 // the forms for logins, qBittorrent and the VPN have their own Save buttons.
 import { $, $$, esc, api, icon, prefs, toast, sfx, copy, confirmBox, chevron, sw, segBtns, ago, size, plural, isPhone, anim, priv, patchHtml } from './ui.js';
 import { app, bus, refreshSettings, refreshStatus, drawNav, isAdmin, login } from './app.js';
-import { applyTemplate, TOKENS } from './rename.js';
+import { applyTemplate, folderPath, TOKENS } from './rename.js';
+import { KIND_LIST, kindInfo } from './kinds.js';
 import { openVerify } from './verify.js';
 
 const SECTIONS = [
@@ -161,12 +162,12 @@ function libraries() {
                 const [info, colour] = SRC_INFO[l.id] || [l.about || '', l.colour || '#FBF8FF'];
                 const [stText, stCol] = STATE_TEXT[l.state] || STATE_TEXT.ok;
                 return `<div class="lib" style="border-top-color:${colour}"><div class="lh"><b>${esc(l.name)}</b>${sw(!off.has(l.id), l.name, `data-src="${l.id}"`)}</div>
-                    <span class="desc" style="font-size:14px">${esc(info)}</span>${l.scraper ? `<span class="desc mono" style="font-size:12px">${l.from === 'yours' ? 'your file' : 'drop-in'} · ${esc(l.file)}</span>` : ''}<span class="lst" style="color:${stCol}">${stText}${l.ms != null && l.state !== 'off' ? ' · ' + (l.ms < 1000 ? l.ms + ' ms' : (l.ms / 1000).toFixed(1) + ' s') : ''}</span></div>`;
+                    <span class="desc" style="font-size:14px">${esc(info)}</span>${l.scraper ? `<span class="desc mono" style="font-size:12px">${l.qbt ? 'qBittorrent plugin' : l.from === 'yours' ? 'your file' : 'drop-in'} · ${esc(l.file)}${l.general ? (sv().sources.general ? ' · general search on' : ' · general search off') : ''}</span>` : ''}<span class="lst" style="color:${stCol}">${stText}${l.ms != null && l.state !== 'off' ? ' · ' + (l.ms < 1000 ? l.ms + ' ms' : (l.ms / 1000).toFixed(1) + ' s') : ''}</span></div>`;
             }).join('')}</div>
             ${scraperNote()}</section>
         <section aria-label="Link-only sites" class="sset" id="links" style="gap:16px">
             <div class="items-h"><h3 class="h-sub" style="font-size:26px">Just links <span class="count">${links}</span></h3><span class="desc" style="font-size:14px">Sites we can only point you to. Your browser visits them, RaveBSD never does.</span></div>
-            <div class="seg" role="radiogroup" aria-label="Which list">${segBtns([['ebooks', 'eBooks', false], ['audiobooks', 'Audiobooks', false], ['movies', 'Movies', false]], ui.linksKind, 'data-act="linkskind"')}</div>
+            <span class="selwrap paper" style="align-self:flex-start"><select data-act="linkskind" aria-label="Which list">${KIND_LIST.map(k => `<option value="${k.mode}"${k.mode === ui.linksKind ? ' selected' : ''}>${esc(k.label)}</option>`).join('')}</select>${chevron(14)}</span>
             <div class="linkpills">${sv().justLinks[ui.linksKind].map((l, i) => `<span class="jl" style="background:${PILL_COLOURS[i % 8]}" title="${esc(l.url)}">${esc(l.name)}<button type="button" aria-label="Remove ${esc(l.name)}" data-act="rmlink" data-i="${i}">×</button></span>`).join('') || '<span class="desc">No sites in this list.</span>'}</div>
             <form class="addsite" data-form="addlink"><label class="field">Name<input class="input" name="name" placeholder="My local library" required maxlength="60"></label>
                 <label class="field">Search page address, with {q} where the words go<input class="input mono" name="url" placeholder="https://library.example.org/?s={q}" required style="font-size:15px"></label>
@@ -182,7 +183,8 @@ function scraperNote() {
     if (!sc) return '';
     const bad = sc.problems || [];
     return `<div class="card" style="padding:18px 20px;display:flex;flex-direction:column;gap:8px">
-        <span class="desc" style="font-size:14px;line-height:1.55">Scrapers marked as drop-in come from files. Add your own to <span class="mono priv" style="font-size:13px">${esc(sc.dir)}</span> (on the host: <span class="mono" style="font-size:13px">./scrapers</span> next to compose.yaml). The next search picks them up.</span>
+        <span class="desc" style="font-size:14px;line-height:1.55">Scrapers marked as drop-in come from files. Add your own to <span class="mono priv" style="font-size:13px">${esc(sc.dir)}</span> (on the host: <span class="mono" style="font-size:13px">./scrapers</span> next to compose.yaml), and qBittorrent search plugins (.py files, unchanged) to its <span class="mono" style="font-size:13px">qbt</span> folder. The next search picks them up.</span>
+        <div class="rows subrows">${row('Include general torrent search', 'qBittorrent plugins that only list “all” join every search, whatever the tab. Off, they never run. Plugins that list categories always run in their tabs.', swk('sources.general', !!sv().sources.general, 'Include general torrent search'))}</div>
         ${bad.map(p => `<span class="err" style="font-size:14px"><b class="mono" style="font-size:13px">${esc(p.file)}</b> was skipped: ${esc(p.error)}</span>`).join('')}</div>`;
 }
 // The Just links list for the open tab differs from the one RaveBSD ships with.
@@ -277,6 +279,7 @@ function searching() {
     return head('searching', 'Searching') + `<div class="card rows">
         ${row('Default results view', 'How a search opens. You can still switch with the icons above the results.', seg('searching.view', [['shelf', 'Shelf'], ['list', 'List']], s.view, 'Default results view'))}
         ${row('Links to show by default', '“Direct links only” hides eBook results that only open a source page, so every result you see can go straight to the server. You can switch it for a single search from the results.', seg('searching.links', [['any', 'Any link'], ['direct', 'Direct links only']], s.links, 'Links to show by default'), note('Audiobook magnets always show, because qBittorrent handles them.'))}
+        ${row('Tabs shown', 'The kinds the search dropdown offers. Hidden ones keep their folders and settings, and come back when switched on.', '', `<div class="tabgrid">${KIND_LIST.map(k => `<span class="tabsw"><span>${esc(k.label)}</span>${sw(!(s.hidden || []).includes(k.mode), k.label, `data-tab="${k.mode}"`)}</span>`).join('')}</div>`)}
         ${row('Audiobook length to show by default', 'Audiobook searches open already narrowed to full or shortened recordings. You can change it on any search with the Length filter above the results.', seg('searching.length', [['any', 'Any'], ['unabridged', 'Unabridged'], ['abridged', 'Abridged']], s.length, 'Audiobook length to show by default'))}
         </div></section>`;
 }
@@ -321,21 +324,24 @@ const SAMPLES = [
     ['ebook', 'Foundation (Asimov Isaac) [1951].mobi', { author: 'Isaac Asimov', title: 'Foundation', year: '1951', ext: 'mobi' }, 0.5],
     ['audiobook', 'The.Hobbit.Tolkien.64kbps/Part 03.mp3', { author: 'J. R. R. Tolkien', title: 'The Hobbit', year: '2011', narrator: 'Andy Serkis', ext: 'mp3', track: 3, trackCount: 19 }, -0.3],
     ['movie', 'Nosferatu_1922_512kb.mp4', { author: 'F. W. Murnau', title: 'Nosferatu', year: '1922', ext: 'mp4' }, 0.3],
+    // A torrent with several files keeps them all, in a folder named by the template.
+    ['game', 'Beneath.a.Steel.Sky.1994.GOG/ (12 files)', { author: '', title: 'Beneath a Steel Sky', year: '1994', ext: 'zip' }, -0.2, true],
 ];
-const dirOf = (s, kind) => (kind === 'audiobook' ? s.audioDir : kind === 'movie' ? s.movieDir : s.ebookDir) || '';
-const tplOf = (s, kind) => (kind === 'audiobook' ? s.audioTemplate : kind === 'movie' ? s.movieTemplate : s.ebookTemplate);
+const dirOf = (s, kind) => s[kindInfo(kind).dirKey] || '';
+const tplOf = (s, kind) => s[kindInfo(kind).tplKey] || kindInfo(kind).template;
 function previews() {
     const s = sv().shelves;
-    return SAMPLES.map(([kind, was, b, rot]) => {
+    return SAMPLES.map(([kind, was, b, rot, folder]) => {
         const dir = dirOf(s, kind).replace(/\/+$/, '');
-        const name = s.rename ? applyTemplate(tplOf(s, kind), b, { tidy: s.tidy }) : (s.tidy ? was.replace(/_/g, ' ').replace(/\s*\(z-lib\.org\)/, '') : was);
+        const name = folder ? (s.rename ? folderPath(tplOf(s, kind), b, { tidy: s.tidy }) : was.split('/')[0]) + '/ (all 12 files, as they came)'
+            : s.rename ? applyTemplate(tplOf(s, kind), b, { tidy: s.tidy }) : (s.tidy ? was.replace(/_/g, ' ').replace(/\s*\(z-lib\.org\)/, '') : was);
         return `<div class="slip" style="transform:rotate(${rot}deg)"><s>${esc(was)}</s><b>${priv(esc(dir))}/${esc(name)}</b></div>`;
     }).join('');
 }
 function folderLine() {
     const f = ui.folders;
     if (!f) return '<span class="desc" id="fline" style="font-size:14px">Checking the folders…</span>';
-    const NAMES = { ebookDir: 'eBooks', audioDir: 'audiobooks', movieDir: 'movies' };
+    const NAMES = Object.fromEntries(KIND_LIST.map(k => [k.dirKey, k.many]));
     const keys = Object.keys(NAMES).filter(k => f[k]);
     const bad = keys.filter(k => !f[k].writable);
     if (bad.length) return `<span class="err" id="fline">The ${bad.map(k => NAMES[k]).join(' and ')} folder${bad.length > 1 ? 's are' : ' is'} not writable. Check the volume in compose.yaml.</span>`;
@@ -345,14 +351,11 @@ function shelves() {
     const s = sv().shelves;
     return head('shelves', 'Shelves and names') + `<div class="card" style="display:flex;flex-direction:column;gap:22px;padding:${isPhone() ? 20 : 26}px">
         <p class="desc" style="margin:0;font-size:16px;line-height:1.55">Everything RaveBSD fetches is renamed from what the search result knows (title, author, year, narrator), not from whatever the file was called, and filed here.</p>
-        <div class="fields"><label class="field" style="flex-basis:280px">eBooks folder<input class="input mono priv" data-text="shelves.ebookDir" value="${esc(s.ebookDir)}" spellcheck="false"></label>
-            <label class="field" style="flex-basis:280px">Audiobooks folder<input class="input mono priv" data-text="shelves.audioDir" value="${esc(s.audioDir)}" spellcheck="false"></label>
-            <label class="field" style="flex-basis:280px">Movies folder<input class="input mono priv" data-text="shelves.movieDir" value="${esc(s.movieDir)}" spellcheck="false"></label></div>
+        <div class="fields wrap">${KIND_LIST.map(k => `<label class="field" style="flex-basis:280px">${esc(k.label)} folder<input class="input mono priv" data-text="shelves.${k.dirKey}" value="${esc(s[k.dirKey])}" spellcheck="false"></label>`).join('')}</div>
         ${folderLine()}
         <div style="display:flex;flex-direction:column;gap:16px;padding-top:22px;border-top:1px solid rgba(255,255,255,0.12)">
-            <label class="field">How eBooks are named<input class="input mono" data-text="shelves.ebookTemplate" data-tpl="ebookTemplate" value="${esc(s.ebookTemplate)}" spellcheck="false"></label>
-            <label class="field">How audiobooks are named<input class="input mono" data-text="shelves.audioTemplate" data-tpl="audioTemplate" value="${esc(s.audioTemplate)}" spellcheck="false"></label>
-            <label class="field">How movies are named<input class="input mono" data-text="shelves.movieTemplate" data-tpl="movieTemplate" value="${esc(s.movieTemplate)}" spellcheck="false"></label>
+            ${KIND_LIST.map(k => `<label class="field">How ${esc(k.many)} are named<input class="input mono" data-text="shelves.${k.tplKey}" data-tpl="${k.tplKey}" value="${esc(s[k.tplKey])}" spellcheck="false"></label>`).join('')}
+            <span class="desc" style="font-size:14px">A torrent with several files is kept whole: the template names its folder (the last part, the file name, is left off) and every file inside stays as it came.</span>
             <div class="tokens"><span style="font-size:13px;font-weight:600;color:var(--text2);margin-right:4px">Click to add</span>${TOKENS.map((t, i) => `<button type="button" data-act="token" data-v="{${t}}" style="background:${TOKEN_COLOURS[i]}">{${t}}</button>`).join('')}</div></div>
         <div style="display:flex;flex-direction:column;gap:14px"><span class="label" style="color:var(--text2)">What it will do to your files</span><div id="previews" style="display:flex;flex-direction:column;gap:14px">${previews()}</div></div>
         <div class="rows subrows" style="border-top:1px solid rgba(255,255,255,0.12)">
@@ -463,7 +466,7 @@ function checkFolders() {
     clearTimeout(fTimer);
     fTimer = setTimeout(async () => {
         const s = sv().shelves;
-        try { ui.folders = await api('/api/folders', { body: { ebookDir: s.ebookDir, audioDir: s.audioDir, movieDir: s.movieDir } }); } catch (e) { ui.folders = null; }
+        try { ui.folders = await api('/api/folders', { body: Object.fromEntries(KIND_LIST.map(k => [k.dirKey, s[k.dirKey]])) }); } catch (e) { ui.folders = null; }
         const el = $('#fline'); if (el) el.outerHTML = folderLine();
     }, 250);
 }
@@ -484,6 +487,7 @@ async function onChange(e) {
     }
     if (t.dataset.num) { const v = Number(t.value); if (Number.isFinite(v)) { await patch(t.dataset.num, v, { quiet: false }); t.value = t.dataset.num.split('.').reduce((o, k) => o[k], sv()); } return; }
     if (t.dataset.sel) return patch(t.dataset.sel, t.value, { quiet: false });
+    if (t.dataset.act === 'linkskind') { ui.linksKind = t.value; return drawSection('libraries'); }
     if (t.dataset.act === 'restore' && t.files[0]) {
         const text = await t.files[0].text();
         let data; try { data = JSON.parse(text); } catch (err) { toast('That file is not a RaveBSD backup'); return; }
@@ -503,7 +507,7 @@ function onInput(e) {
 // Whatever a click asks of the server, a failure ends as a message instead of nothing.
 const onClick = e => click(e).catch(err => toast(err.message));
 async function click(e) {
-    const t = e.target.closest('[data-act], [data-set], [data-seg], [data-src], [data-local]');
+    const t = e.target.closest('[data-act], [data-set], [data-seg], [data-src], [data-local], [data-tab]');
     if (!t || !root.contains(t)) return;
     if (t.dataset.set) {
         const on = t.getAttribute('aria-checked') !== 'true';
@@ -516,6 +520,7 @@ async function click(e) {
         if (key.startsWith('vpn.')) { await refreshStatus(); drawSection('vpn'); }
         if (key.startsWith('shelves.')) $('#previews').innerHTML = previews();
         if (key === 'sources.slum') { await refreshStatus(); drawSection('libraries'); }
+        if (key === 'sources.general') drawSection('libraries');
         return;
     }
     if (t.dataset.local) {
@@ -534,6 +539,15 @@ async function click(e) {
         }
         return;
     }
+    if (t.dataset.tab) {
+        const m = t.dataset.tab, on = t.getAttribute('aria-checked') !== 'true';
+        const hidden = new Set(sv().searching.hidden || []); on ? hidden.delete(m) : hidden.add(m);
+        // One tab always stays.
+        if (hidden.size >= KIND_LIST.length) { toast('One tab has to stay'); return; }
+        t.setAttribute('aria-checked', on);
+        if (!(await patch('searching.hidden', [...hidden]))) t.setAttribute('aria-checked', !on);
+        return;
+    }
     if (t.dataset.src) {
         const id = t.dataset.src, on = t.getAttribute('aria-checked') !== 'true';
         const off = new Set(sv().sources.off); on ? off.delete(id) : off.add(id);
@@ -544,7 +558,7 @@ async function click(e) {
     switch (t.dataset.act) {
         case 'attention': return goAttention();
         case 'resetlinks': {
-            if (!await confirmBox('Reset the list?', `The ${({ ebooks: 'eBook', audiobooks: 'audiobook', movies: 'movie' })[ui.linksKind]} sites go back to the ones RaveBSD started with. Sites you added are removed.`, 'Reset', false)) return;
+            if (!await confirmBox('Reset the list?', `The ${esc(kindInfo((KIND_LIST.find(k => k.mode === ui.linksKind) || KIND_LIST[0]).kind).one)} sites go back to the ones RaveBSD started with. Sites you added are removed.`, 'Reset', false)) return;
             if (await patch('justLinks.' + ui.linksKind, sv().defaults.justLinks[ui.linksKind])) { drawSection('libraries'); toast('Back to the original list'); }
             return;
         }

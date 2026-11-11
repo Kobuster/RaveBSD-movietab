@@ -33,6 +33,8 @@
 import { browserGet, browserFetch, browserAvailable, verifyWindowOpen } from './browser.js';
 import { slumOrder } from './slum.js';
 import { refreshScrapers, scrapersFor, getScraper } from './scrapers.js';
+import { modeFrom } from './kinds.js';
+import { storedTorrent } from './torrentfile.js';
 
 const CORS = {
     'Access-Control-Allow-Origin':  '*',
@@ -1527,6 +1529,9 @@ async function torrentFile(id) {
     const r = resultStore.get(id);
     const hash = String((r && r.infoHash) || '').toLowerCase();
     if (!/^[a-f0-9]{40}$/.test(hash)) return err('No torrent information for this result', 404);
+    // One a search plugin handed over is passed on as it is (it may carry a private tracker's passkey: yours).
+    const own = storedTorrent(hash);
+    if (own) return new Response(own, { headers: { 'Content-Type': 'application/x-bittorrent', 'Content-Disposition': `attachment; filename="${hash}.torrent"`, 'Cache-Control': 'no-store', 'X-Content-Type-Options': 'nosniff' } });
     for (const url of torrentCaches(hash)) {
         try {
             const res = await get(url, 20000);
@@ -1704,6 +1709,9 @@ export const setResultDecorator = fn => { decorate = fn; };
 // Sources the owner switched off in Settings never run.
 let sourcesOff = new Set();
 export const setSourcesOff = list => { sourcesOff = new Set(list || []); };
+// "Include general torrent search": qBittorrent plugins that only list "all" join every search.
+let generalSearch = false;
+export const setGeneralSearch = on => { generalSearch = !!on; };
 // While the VPN tunnel is down (and Settings say to stop), searches answer with this message instead.
 let searchBlocked = () => '';
 export const setSearchGate = fn => { searchBlocked = fn; };
@@ -1791,7 +1799,8 @@ function mergeAndRank(all, query, mode, opts) {
     const seen = new Set();
     const out = interleaveGroups(pool, r => r._band + '|' + rankTier(r, mode)).filter(r => {
         // Source and format are part of the key so other sources and formats of the same book stay visible.
-        const key = ((r.title||'') + '|' + (r.author||'') + '|' + (r.source||'') + '|' + (r.format||'')).toLowerCase().replace(/\s+/g,' ').trim();
+        // Torrents from qBittorrent plugins differ by release (1080p, DVDRip...): their own name is part of the key.
+        const key = ((r.title||'') + '|' + (r.author||'') + '|' + (r.source||'') + '|' + (r.format||'') + (r.release ? '|' + r.release : '')).toLowerCase().replace(/\s+/g,' ').trim();
         if (seen.has(key)) return false;
         seen.add(key);
         return true;
@@ -1860,7 +1869,7 @@ async function runFullSearch(query, mode, resolveTopN, env, onProgress, opts) {
     // With advanced search the user can pick sources, and unchosen ones never run.
     const jobs = [];
     const add = (name, applies, run) => { if (applies && !sourcesOff.has(name) && (!opts.sources.length || opts.sources.includes(name))) jobs.push({ name, fn: run, run: run(query) }); };
-    // The libraries written into this file are for books; movies come only from drop-in scrapers.
+    // The libraries written into this file are for books; every other tab gets only drop-in scrapers and plugins.
     const ebooks = mode === 'ebooks', audio = mode === 'audiobooks', books = ebooks || audio;
     await refreshScrapers();
     // LibGen has no audiobook section: in audiobook mode only actual audio files it happens to hold count.
@@ -1877,7 +1886,7 @@ async function runFullSearch(query, mode, resolveTopN, env, onProgress, opts) {
     add('audiobookbay', audio, q => searchAudiobookBay(q));
     add('librivox', audio, q => searchLibriVox(q, mode));
     add('audiobooksbee', audio, q => searchAudiobooksBee(q));
-    const scrapers = scrapersFor(mode);
+    const scrapers = scrapersFor(mode, { general: generalSearch });
     for (const s of scrapers) add(s.id, true, q => runScraper(s, q, mode));
     // The page knows the built-in libraries' names; drop-in ones are named here.
     const labels = Object.fromEntries(scrapers.map(s => [s.id, s.name]));
@@ -1955,12 +1964,12 @@ async function runFullSearch(query, mode, resolveTopN, env, onProgress, opts) {
 const SEARCH_EDGE_TTL_S = 600;
 // LibGen is the main source and sometimes fails for a moment. If it returned nothing, cache for 1 minute only.
 // Movie searches never ask LibGen, so they keep the full time.
-const degradedTtl = (meta, mode) => (mode === 'movies' || (meta && meta.libgen > 0) ? SEARCH_EDGE_TTL_S : 60);
+const degradedTtl = (meta, mode) => (!['ebooks', 'audiobooks'].includes(mode) || (meta && meta.libgen > 0) ? SEARCH_EDGE_TTL_S : 60);
 const searchCacheKey = (mode, query, opts) =>
     'https://edge-cache.internal/search/all?mode=' + encodeURIComponent(mode) + '&q=' + encodeURIComponent((query || '').trim().toLowerCase().slice(0, 200))
     + (optsKey(opts) ? '&o=' + encodeURIComponent(optsKey(opts)) : '')
     // Switching a source off must not be hidden by a remembered answer.
-    + (sourcesOff.size ? '&off=' + [...sourcesOff].sort().join(',') : '');
+    + (sourcesOff.size ? '&off=' + [...sourcesOff].sort().join(',') : '') + (generalSearch ? '&general=1' : '');
 
 // The whole answer (/search/all without stream, and /api/v1/search). The cache holds every result, shared
 // with the streamed search; links=direct and the libraries count are applied on the way out.
@@ -1999,7 +2008,7 @@ export default {
         // q, or title and author given separately (advanced search / API callers)
         const query = (url.searchParams.get('q') || [url.searchParams.get('title'), url.searchParams.get('author')].filter(Boolean).join(' ')).trim().slice(0, 300);
         const kindParam = url.searchParams.get('kind') || '', modeParam = url.searchParams.get('mode');
-        const mode  = modeParam === 'audiobooks' || /^audio/.test(kindParam) ? 'audiobooks' : modeParam === 'movies' || /^(movie|film)/.test(kindParam) ? 'movies' : 'ebooks';
+        const mode  = modeFrom(modeParam, kindParam);
         const opts  = parseOpts(url);
 
         if (!query) return err('No query provided', 400);

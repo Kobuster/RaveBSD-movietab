@@ -1,5 +1,6 @@
 # RaveBSD with movies. Start it with: docker compose up -d --build
-# Settings and the shelf list are in ./data, the files themselves in ./books, ./audiobooks and ./movies.
+# Settings and the shelf list are in ./data, the files themselves in one folder per tab (./books, ./audiobooks, ./movies,
+# ./tv, ./anime, ./music, ./games, ./software, ./pictures).
 # Backing up these folders (plus .env and ./scrapers) backs up the whole deployment.
 services:
   ravebsd:
@@ -22,7 +23,14 @@ services:
       # Mount the same host folder into qBittorrent (see qBittorrent in the admin panel for the folder mapping).
       - ${DOWNLOADS_PATH:-./downloads}:/downloads:z
       - ${MOVIES_PATH:-./movies}:/movies:z
-      # Your own drop-in scrapers (one .js file per source). Read-only: RaveBSD only reads them.
+      - ${TV_PATH:-./tv}:/tv:z
+      - ${ANIME_PATH:-./anime}:/anime:z
+      - ${MUSIC_PATH:-./music}:/music:z
+      - ${GAMES_PATH:-./games}:/games:z
+      - ${SOFTWARE_PATH:-./software}:/software:z
+      - ${PICTURES_PATH:-./pictures}:/pictures:z
+      # Your own drop-in scrapers (one .js file per source) and qBittorrent search plugins (.py files in its qbt
+      # folder). Read-only: RaveBSD only reads them.
       - ${SCRAPERS_PATH:-./scrapers}:/scrapers:ro,z
     # Chromium needs more shared memory than the Docker default.
     shm_size: "512mb"

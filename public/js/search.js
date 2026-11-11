@@ -8,6 +8,7 @@ import { $, $$, esc, api, icon, prefs, isPhone, size, toast, hideToast, toastId,
     paletteFor, spineFor, coverPalette, genCover, shortTitle, mix, rgba, hash, chevron, clientId, privPath } from './ui.js';
 import { app, bus, go, setBg, drawNav } from './app.js';
 import { tidyName } from './rename.js';
+import { KIND_LIST, kindInfo } from './kinds.js';
 
 const LIBS = {
     libgen: 'LibGen', annas: "Anna's Archive", archive: 'Internet Archive', gutenberg: 'Project Gutenberg', openstax: 'OpenStax',
@@ -23,10 +24,13 @@ const LINK = {
     magnet: { text: 'magnet', ring: '#D68FE0', bg: '#F0D3FF', dot: '#9A3FB0', dbg: 'rgba(214,143,224,0.22)', dfg: '#F0C6F6' },
     pending: { text: 'finding the file link', short: 'checking…', ring: 'rgba(255,255,255,0.55)', bg: 'rgba(255,255,255,0.6)', dot: '#8A86A8', dbg: 'rgba(255,255,255,0.1)', dfg: '#D8D3CC' },
 };
-const FORMATS = { ebooks: ['epub', 'pdf', 'mobi', 'azw3'], audiobooks: ['m4b', 'mp3', 'zip'], movies: ['mp4', 'mkv', 'webm', 'avi'] };
-const MODES = ['ebooks', 'audiobooks', 'movies'];
-// The colour the search words are shown in, per kind.
-const QCOL = { ebooks: '#FFD54A', audiobooks: '#FF9FE8', movies: '#8FD0FF' };
+// Every tab, its formats and the colour the search words are shown in, from the kinds table (src/kinds.js).
+const FORMATS = Object.fromEntries(KIND_LIST.map(k => [k.mode, k.formats]));
+const MODES = KIND_LIST.map(k => k.mode);
+const QCOL = Object.fromEntries(KIND_LIST.map(k => [k.mode, k.colour]));
+// The tabs the dropdown offers: all but the ones hidden in Settings > Searching (the open one always stays).
+const shownModes = () => { const hidden = (app.settings && app.settings.searching && app.settings.searching.hidden) || []; return KIND_LIST.filter(k => k.mode === S.mode || !hidden.includes(k.mode)); };
+const modeLabel = m => (KIND_LIST.find(k => k.mode === m) || KIND_LIST[0]).label;
 const PER_SHELF = 14;
 
 // Everything about the current search lives here, so leaving for the Shelf and coming back keeps it.
@@ -105,10 +109,8 @@ export function relayout() { if (location.pathname === '/results' && S.q) render
 export const lastResults = () => (S.q ? resultsUrl() : null);
 
 // ── Discover ─────────────────────────────────────────────────────────────────
-const modeSwitch = (cls = 'modeswitch') => `<div class="${cls}" role="radiogroup" aria-label="Search in">
-    <button type="button" role="radio" aria-checked="${S.mode === 'ebooks'}" data-act="mode" data-v="ebooks">eBooks</button>
-    <button type="button" role="radio" aria-checked="${S.mode === 'audiobooks'}" data-act="mode" data-v="audiobooks">Audiobooks</button>
-    <button type="button" role="radio" aria-checked="${S.mode === 'movies'}" data-act="mode" data-v="movies">Movies</button></div>`;
+// What to search in: a dropdown, since there are more kinds than fit a row of buttons.
+const modeSwitch = (cls = '') => `<span class="selwrap modesel${/\bsm\b/.test(cls) ? ' sm' : ''}${/\bmodes\b/.test(cls) ? ' ph' : ''}"><select data-act="modesel" aria-label="Search in">${shownModes().map(k => `<option value="${k.mode}"${k.mode === S.mode ? ' selected' : ''}>${esc(k.label)}</option>`).join('')}</select>${chevron(14)}</span>`;
 const goBtn = (sz, ic) => `<button type="submit" class="gobtn" aria-label="Find it" style="width:${sz}px;height:${sz}px">${icon('search', ic, 2.6)}</button>`;
 
 let overlay = null;
@@ -158,7 +160,7 @@ function advPanel(phone) {
         <div class="fields"><label class="field">Language<span class="selwrap paper"><select id="a-lang">${langs.map(l => `<option${a.lang === l ? ' selected' : ''}>${l}</option>`).join('')}</select>${chevron(14)}</span></label>
             <div class="fields two"><label class="field">Published from<input class="input" id="a-from" placeholder="1965" inputmode="numeric" maxlength="4" value="${esc(a.from || '')}"></label>
             <label class="field">to<input class="input" id="a-to" placeholder="2024" inputmode="numeric" maxlength="4" value="${esc(a.to || '')}"></label></div></div>
-        <div class="field">Format${chips('ebooks')}${chips('audiobooks')}${chips('movies')}</div>
+        <div class="field">Format${MODES.map(chips).join('')}</div>
         <div class="adv-btns"><button type="button" class="btn outline" data-act="adv-clear">Clear</button><button type="button" class="btn yellow" data-act="adv-go">Search with these</button></div>
         </div></div>`;
 }
@@ -200,7 +202,8 @@ function searchUrl(q, mode, adv) {
 
 function resetFilters() {
     const st = app.settings ? app.settings.searching : { links: 'direct', length: 'unabridged' };
-    S.f = { fmt: 'all', link: S.mode !== 'audiobooks' && st.links === 'direct' ? 'direct' : 'any', len: S.mode === 'audiobooks' ? st.length : 'any', narrator: '', sort: 'best' };
+    // "Direct files only" is the eBooks default; torrent tabs would show nothing with it.
+    S.f = { fmt: 'all', link: S.mode === 'ebooks' && st.links === 'direct' ? 'direct' : 'any', len: S.mode === 'audiobooks' ? st.length : 'any', narrator: '', sort: 'best' };
     if (S.adv && S.adv.formats.length === 1) S.f.fmt = S.adv.formats[0];
 }
 
@@ -661,8 +664,8 @@ function filters(phone) {
 function body(list, r, v, phone) {
     if (!S.results.length) {
         if (S.searching) return `<div class="empty"><b>Asking the libraries…</b><span>Results show up here as they answer.</span></div>`;
-        // Movies come only from drop-in scrapers: with none switched on there is nobody to ask.
-        if (S.mode === 'movies' && S.finished && !S.sources.length && !S.error) return `<div class="empty"><b>No movie sources are switched on</b><span>Switch one on in the admin panel under Libraries, or add a scraper file. The sites below still work.</span></div>`;
+        // Every tab but the two book ones has only drop-in scrapers and plugins: with none switched on there is nobody to ask.
+        if (!['ebooks', 'audiobooks'].includes(S.mode) && S.finished && !S.sources.length && !S.error) return `<div class="empty"><b>No ${esc(modeLabel(S.mode).toLowerCase())} sources are switched on</b><span>Switch one on in the admin panel under Libraries, or add a scraper file or a qBittorrent plugin. The sites below still work.</span></div>`;
         return `<div class="empty"><b>Nothing found${S.error ? '' : ' in the libraries'}</b><span>${S.error ? esc(S.error) : 'Try other words, or one of the sites below.'}</span></div>`;
     }
     if (!list.length) return `<div class="empty"><b>Nothing matches these filters</b><span>${S.results.length} result${S.results.length === 1 ? '' : 's'} are hidden by the filters above.</span><button type="button" class="btn outline sm" data-act="clear-filters">Show everything</button></div>`;
@@ -695,7 +698,7 @@ function spineHtml(r, phone) {
 }
 
 // Where the server files a result. The server sends the place inside the shelf; admins also see the folder.
-const fileAsShown = r => { const sh = (app.settings && app.settings.shelves) || {}, dir = (r.kind === 'audiobook' ? sh.audioDir : r.kind === 'movie' ? sh.movieDir : sh.ebookDir) || ''; return (dir ? dir.replace(/\/+$/, '') + '/' : '') + (r.fileAs || ''); };
+const fileAsShown = r => { const sh = (app.settings && app.settings.shelves) || {}, dir = sh[kindInfo(r.kind).dirKey] || ''; return (dir ? dir.replace(/\/+$/, '') + '/' : '') + (r.fileAs || ''); };
 // The pulled-out book takes the shape of its real cover (within the usual size, standing on the shelf), so
 // wide or tall covers are not cropped. The back cover follows.
 window.rbsdFitCover = img => {
@@ -769,6 +772,8 @@ function metaLine(r) {
     const bits = [r.author, r.series, r.year, audio && r.narrator ? 'read by ' + r.narrator : '', !audio && parseInt(r.pages) > 0 ? parseInt(r.pages) + ' pages' : '', S.mode === 'movies' ? r.length : '', lang].filter(Boolean);
     return bits.join(' · ');
 }
+// Torrents from qBittorrent plugins say how many seed them (-1: the plugin does not know).
+const seedsText = r => (typeof r.seeds === 'number' && r.seeds >= 0 ? `${r.seeds} seed${r.seeds === 1 ? '' : 's'}` : '');
 function linkPill(r, small) {
     const lt = LINK[r.linkType] || LINK.page;
     return `<span class="pill${small ? ' sm' : ''}" style="background:${lt.bg}"><span class="d" style="background:${lt.dot}"></span>${esc(lt.text)}</span>`;
@@ -800,7 +805,9 @@ function card(r, list, phone) {
     const magnetBtns = r.linkType === 'magnet' ? `<div class="rc-mag"><button type="button" class="btn outline-ink" data-act="magnet" data-id="${esc(r.id)}">Magnet link</button><button type="button" class="btn outline-ink" data-act="torrent" data-id="${esc(r.id)}">Torrent file</button></div>` : '';
     const openBtn = page && r.linkType !== 'page' ? `<a class="iconbtn ink" href="${esc(page)}" target="_blank" rel="noopener noreferrer" aria-label="Open the source page" title="Open the source page">${icon('ext', phone ? 22 : 26, 2)}</a>` : '';
     const fail = S.dl[r.id] && S.dl[r.id].state === 'failed' ? `<span class="rc-err">${esc(S.dl[r.id].error || 'The download failed')}</span>` : '';
-    const chips = audio ? [r.length, r.abridged === true ? 'abridged' : r.abridged === false ? 'unabridged' : '', r.bitrate].filter(Boolean) : [];
+    const chips = [...(audio ? [r.length, r.abridged === true ? 'abridged' : r.abridged === false ? 'unabridged' : '', r.bitrate] : []), seedsText(r)].filter(Boolean);
+    // A torrent's own name (qBittorrent plugins): the title above is read from it, and may be a guess.
+    const rel = r.release && r.release !== r.title ? `<span class="rc-rel" title="${esc(r.release)}">${esc(r.release)}</span>` : '';
     if (phone) {
         const idx = list.indexOf(r), n = list.length;
         const dots = Array.from({ length: Math.min(7, n) }, (_, k) => { const start = Math.max(0, Math.min(n - 7, idx - 3)); return `<i class="${start + k === idx ? 'on' : ''}"></i>`; }).join('');
@@ -809,7 +816,7 @@ function card(r, list, phone) {
             <div class="rc-top"><span class="rc-tag">From ${esc(srcName(r.source))}${best ? ' · best match' : ''}</span>
               <span class="rc-nav"><button type="button" aria-label="Previous result" data-act="step" data-v="-1"${idx ? '' : ' disabled'}>${icon('left', 16, 3)}</button><button type="button" aria-label="Next result" data-act="step" data-v="1"${idx < n - 1 ? '' : ' disabled'}>${icon('right', 16, 3)}</button></span></div>
             <h2 class="rc-title" style="font-size:${tsize}px">${esc(t)}</h2>
-            <span class="rc-meta">${esc(metaLine(r))}</span>
+            <span class="rc-meta">${esc(metaLine(r))}</span>${rel}
             <div class="rc-chips">${r.format || r.filesize ? `<span class="pchip">${esc(String(r.format || '').toUpperCase())}${r.format && r.filesize ? ' · ' : ''}${r.filesize ? size(r.filesize) : ''}</span>` : ''}${chips.map(c => `<span class="pchip">${esc(c)}</span>`).join('')}${linkPill(r, true)}</div>
             <span class="rc-file">Filed on the server as ${privPath(fileAsShown(r))}</span>
             ${fail}
@@ -820,7 +827,7 @@ function card(r, list, phone) {
         <div class="rc-l">
             <span class="rc-tag">${best ? 'Selected · best match' : 'Selected result'}</span>
             <h2 class="rc-title" style="font-size:${tsize}px">${esc(t)}</h2>
-            <span class="rc-meta">${esc(metaLine(r))}</span>
+            <span class="rc-meta">${esc(metaLine(r))}</span>${rel}
             ${chips.length ? `<div class="rc-chips">${chips.map(c => `<span class="pchip">${esc(c)}</span>`).join('')}</div>` : ''}
             <div class="found"><span class="fo"><span class="label">Found on</span><b>${esc(srcName(r.source))}</b></span>
                 <span class="ffmt">${esc(String(r.format || '?').toUpperCase())}</span><span class="fsz">${esc(size(r.filesize) || 'size unknown')}</span>${linkPill(r)}</div>
@@ -858,14 +865,15 @@ function listView(list, phone) {
         const lt = LINK[r.linkType] || LINK.page;
         const pill = `<span class="pill${phone ? ' sm' : ''}" style="background:${lt.dbg};color:${lt.dfg}"><span class="d" style="background:${lt.ring}"></span>${esc(lt.short || lt.text)}</span>`;
         const fmt = esc(String(r.format || '?').toUpperCase());
-        const meta = esc(metaLine(r));
+        // Torrents show their own name (which release it is) and seeds; the phone row has the seeds below.
+        const meta = esc([metaLine(r), r.release && r.release !== r.title ? r.release : '', phone ? '' : seedsText(r)].filter(Boolean).join(' · '));
         const bm = r.id === best ? '<span class="bm">Best match</span>' : '';
         const b = rowButtons(r, phone);
         const cls = `lrow${r.id === best ? ' best' : ''}${r.onShelf ? ' onshelf' : ''}`;
         const onshelf = r.onShelf && r.fileAs ? `<span class="lpath">On the shelf · ${privPath(fileAsShown(r))}</span>` : '';
         if (phone) return `<article class="${cls} ph" data-row>
             <div class="lph-top">${thumb(r, true)}<div class="lbook"><b>${esc(r.title)}</b><span>${meta}</span>${bm}${onshelf}</div></div>
-            <div class="lph-meta"><span class="lfmt">${fmt}</span><span class="lsz">${esc([size(r.filesize), r.length].filter(Boolean).join(' · '))}</span><span class="lsrc">${esc(srcName(r.source))}</span>${pill}</div>
+            <div class="lph-meta"><span class="lfmt">${fmt}</span><span class="lsz">${esc([size(r.filesize), r.length, seedsText(r)].filter(Boolean).join(' · '))}</span><span class="lsrc">${esc(srcName(r.source))}</span>${pill}</div>
             <div class="lph-btns">${b.main}${b.open}</div>${b.mag ? `<div class="lph-mag">${b.mag}</div>` : ''}</article>`;
         return `<article class="${cls}" data-row>
             ${thumb(r, false)}
@@ -875,7 +883,7 @@ function listView(list, phone) {
             <span class="lsrc">${esc(srcName(r.source))}</span><span class="llink">${pill}</span>
             <span class="lact">${audio ? `<span class="lact-top">${b.main}${b.open}</span>${b.mag}` : b.main + b.open}</span></article>`;
     }).join('');
-    const head = phone ? '' : `<div class="lhead" aria-hidden="true"><span class="c-th"></span><span class="c-book">${audio ? 'Listen' : S.mode === 'movies' ? 'Film' : 'Book'}</span><span class="c-fmt">Format</span><span class="c-sz">Size</span>${audio ? '<span class="c-len">Length</span>' : ''}<span class="c-src">From</span><span class="c-link">Link</span><span class="c-act"></span></div>`;
+    const head = phone ? '' : `<div class="lhead" aria-hidden="true"><span class="c-th"></span><span class="c-book">${audio ? 'Listen' : S.mode === 'movies' ? 'Film' : S.mode === 'ebooks' ? 'Book' : 'Title'}</span><span class="c-fmt">Format</span><span class="c-sz">Size</span>${audio ? '<span class="c-len">Length</span>' : ''}<span class="c-src">From</span><span class="c-link">Link</span><span class="c-act"></span></div>`;
     return `<section class="list${audio ? ' audio' : ''}" aria-label="Results">${head}${rows}${list.length > shown ? `<div class="lmore"><span class="desc">${shown} of ${list.length}</span><button type="button" class="btn outline sm" data-act="listmore">Show ${Math.min(50, list.length - shown)} more</button></div>` : ''}</section>`;
 }
 function stackRows(page, delay = 0) {
@@ -927,16 +935,6 @@ function onClick(e) {
     if (!t || !root.contains(t)) return;
     const act = t.dataset.act, id = t.dataset.id;
     switch (act) {
-        case 'mode': {
-            if (S.mode === t.dataset.v) return;
-            S.mode = t.dataset.v;
-            $$('[data-act="mode"]').forEach(b => b.setAttribute('aria-checked', b.dataset.v === S.mode));
-            $$('#adv [data-fmt]').forEach(g => { g.hidden = g.dataset.fmt !== S.mode; });
-            // On the results page the switch is live: search again in the other kind, without the formats of the
-            // kind just left (an ebook format would filter out every audiobook).
-            if (location.pathname === '/results' && S.q) searchAgain(S.q, S.adv && { ...S.adv, formats: S.adv.formats.filter(f => FORMATS[S.mode].includes(f)) });
-            return;
-        }
         case 'adv': return toggleAdv();
         case 'chip': {
             const group = t.parentElement, any = t.hasAttribute('data-any');
@@ -997,7 +995,17 @@ function onClick(e) {
         case 'torrent': return torrent(id);
     }
 }
+function setMode(m) {
+    if (S.mode === m || !MODES.includes(m)) return;
+    S.mode = m;
+    $$('[data-act="modesel"]').forEach(s => { s.value = S.mode; });
+    $$('#adv [data-fmt]').forEach(g => { g.hidden = g.dataset.fmt !== S.mode; });
+    // On the results page the switch is live: search again in the other kind, without the formats of the
+    // kind just left (an ebook format would filter out every audiobook).
+    if (location.pathname === '/results' && S.q) searchAgain(S.q, S.adv && { ...S.adv, formats: S.adv.formats.filter(f => FORMATS[S.mode].includes(f)) });
+}
 function onChange(e) {
+    if (e.target.matches('[data-act="modesel"]')) return setMode(e.target.value);
     const t = e.target.closest('[data-act="sort"], [data-act="narrator"]');
     if (!t) return;
     S.f[t.dataset.act] = t.value; S.sel = ''; S.page = 0;

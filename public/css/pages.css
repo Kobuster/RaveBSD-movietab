@@ -614,3 +614,17 @@ pre.code { margin: 0; padding: 14px 16px; border-radius: 14px; background: #0807
     .sset .row .seg button svg { display: none; }
     .stat > div > svg { max-width: 40%; height: auto; }
 }
+
+/* The kind of search: a dropdown pill in the search bars (more kinds than fit as buttons). */
+.selwrap.modesel { flex: none; }
+.selwrap.modesel select { height: 48px; padding: 0 40px 0 20px; border: 0; border-radius: 999px; background: var(--ink); color: var(--paper); font: 700 15px var(--sans); text-transform: none; cursor: pointer; }
+.selwrap.modesel svg { color: var(--paper); right: 16px; }
+.selwrap.modesel.ph select { height: 44px; background: #ECE8FF; color: var(--ink); }
+.selwrap.modesel.ph svg { color: var(--ink); }
+.selwrap.modesel.sm select { height: 40px; font-size: 14px; padding: 0 36px 0 16px; }
+.selwrap.modesel select:focus-visible { outline: 3px solid var(--ink); outline-offset: 2px; }
+/* A torrent's own name under the title it was read as. */
+.rc-rel { font: 500 13px var(--mono); opacity: 0.7; overflow-wrap: anywhere; display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden; }
+/* Settings > Searching: which tabs the dropdown offers. */
+.tabgrid { display: flex; flex-wrap: wrap; gap: 10px 22px; margin-top: 12px; }
+.tabsw { display: inline-flex; align-items: center; gap: 10px; font-weight: 600; font-size: 15px; }

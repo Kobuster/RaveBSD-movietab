@@ -12,9 +12,10 @@ import path from 'node:path';
 import crypto from 'node:crypto';
 import { EventEmitter, once } from 'node:events';
 import { DATA, settings, readJson, writeJson, setAside, cannotRead, countDownload, countSaved } from './config.js';
-import { applyTemplate, singleFileAudiobook, numberedPath, tidyName, safeSegment } from './rename.js';
+import { applyTemplate, singleFileAudiobook, numberedPath, tidyName, safeSegment, folderPath } from './rename.js';
 import { getResult, resolveOne, zlibFileLink, freshLibgenLink, currentUA, canResolve } from './sources.js';
-import { kindOf, KINDS, VIDEO_EXT } from './kinds.js';
+import { kindOf, kindInfo, KINDS } from './kinds.js';
+import { storedTorrent, forgetTorrent } from './torrentfile.js';
 import * as qbit from './qbit.js';
 import { vpnBlocks } from './vpn.js';
 import { listFiles, extractZip } from './zip.js';
@@ -40,8 +41,9 @@ for (const j of shelf.jobs) if (j.how === 'direct' && !/^(failed)$/.test(j.state
 for (const j of shelf.jobs) delete j.ctrl;
 const save = () => writeJson(SHELF_FILE, shelf);
 
-const dirFor = kind => path.resolve(kind === 'audiobook' ? settings.shelves.audioDir : kind === 'movie' ? settings.shelves.movieDir : settings.shelves.ebookDir);
-const templateFor = kind => (kind === 'audiobook' ? settings.shelves.audioTemplate : kind === 'movie' ? settings.shelves.movieTemplate : settings.shelves.ebookTemplate);
+// Each kind's folder and naming template, from the kinds table (src/kinds.js).
+export const dirFor = kind => path.resolve(settings.shelves[kindInfo(kind).dirKey]);
+const templateFor = kind => settings.shelves[kindInfo(kind).tplKey] || kindInfo(kind).template;
 const key = (kind, title, author) => [kind, title, author].map(s => tidyName(s).toLowerCase()).join('|');
 const bookOf = r => ({ author: r.author, title: r.title, year: r.year, series: r.series, narrator: r.narrator, ext: r.format });
 
@@ -99,7 +101,8 @@ export function decorateResult(r) {
     r.kind = kindOf(r._mode);
     // AudiobookBay results are always magnets. Their links are read from the post only when used (download,
     // copy, torrent file): reading every post per search got this server's address refused by the site.
-    r.linkType = r.magnet || r.source === 'AudiobookBay' ? 'magnet' : r.directUrl ? 'direct' : canResolve(r) && !r._resolved ? 'pending' : 'page';
+    // A search plugin's .torrent links likewise are fetched only when used (torrentToken, see qbtplugins.js).
+    r.linkType = r.magnet || r.source === 'AudiobookBay' || r.torrentToken ? 'magnet' : r.directUrl ? 'direct' : canResolve(r) && !r._resolved ? 'pending' : 'page';
     return Object.assign(r, liveMarks(null, r));
 }
 // What changes after a search is cached (server.js puts it right on every answer): whether the book is on the
@@ -110,8 +113,10 @@ export function liveMarks(me, r) {
     const job = shelf.jobs.find(j => j.resultId === r.id && canSee(me, j));
     return {
         onShelf: onShelfFor(me, { ...r, kind }),
-        // Relative to the shelf folder: the folder itself is the admin's business (their page adds it).
-        fileAs: kind === 'audiobook' && /\{track\}/.test(t)
+        // Relative to the shelf folder: the folder itself is the admin's business (their page adds it). Torrents are
+        // kept as the folder they come in (see fileIt), so they show that folder.
+        fileAs: r.magnet || r.linkType === 'magnet' ? folderPath(t, bookOf(r), { tidy: settings.shelves.tidy }) + '/'
+            : kind === 'audiobook' && /\{track\}/.test(t)
             ? singleFileAudiobook(t, bookOf(r)).replace(/\.[^.]*$/, '') + '/'
             : applyTemplate(t, bookOf(r), { tidy: settings.shelves.tidy }),
         jobId: job ? job.id : '',
@@ -345,7 +350,11 @@ async function runDirect(j) {
 async function addToQbit(j) {
     try {
         // One qBittorrent already has (handed over before a restart, or added by hand) is followed, not added again.
-        if (!(j.hash && await qbit.torrentInfo(j.hash))) await qbit.addMagnet(j.link);
+        if (!(j.hash && await qbit.torrentInfo(j.hash))) {
+            // A .torrent a search plugin handed over goes in as the file (see torrentfile.js), anything else as the magnet.
+            const file = storedTorrent(j.hash);
+            if (file) await qbit.addTorrentFile(file, j.hash + '.torrent'); else await qbit.addMagnet(j.link);
+        }
         j.state = 'downloading'; j.addedToQbit = Date.now();
         save(); announceJobs();
         watchTorrents();
@@ -392,6 +401,7 @@ async function finishTorrent(j, t) {
         j.originalName = path.basename(src);
         await fileIt(j, files, { copy: true, srcRoot: st.isDirectory() ? src : '' });
         if (settings.qbit.onFinish === 'move') await qbit.removeTorrent(j.hash, true).catch(() => {});
+        forgetTorrent(j.hash).catch(() => {});
     } catch (e) { fail(j, e.message); }
 }
 
@@ -420,14 +430,14 @@ export async function fileIt(j, files, { copy = false, srcRoot = '' } = {}) {
     const dup = settings.shelves.duplicate;
     let mainPath, placed = [];
 
+    // A torrent with several files is kept whole, as it came: games and programs need every file, and books, albums
+    // and films keep their covers and subtitles. Only the folder it sits in is named by the template.
+    if (j.how === 'qbit' && srcRoot && files.length > 1) return fileFolder(j, files, srcRoot, copy);
     const audio = files.filter(f => AUDIO_EXT.test(f));
     const multi = j.kind === 'audiobook' && audio.length > 1;
     if (!multi) {
-        // One file: the book itself (for torrents, the biggest matching file). A movie is its biggest video, so
-        // samples, subtitles and artwork in the same torrent are left behind.
-        const videos = j.kind === 'movie' ? files.filter(f => VIDEO_EXT.test(f)) : [];
+        // One file: the book itself (for torrents, the biggest matching file).
         const pick = files.length === 1 ? files[0]
-            : videos.length ? videos.sort((a, b) => fs.statSync(b).size - fs.statSync(a).size)[0]
             : (j.kind === 'audiobook' ? audio : files.filter(f => /\.(epub|pdf|mobi|azw3?|fb2|djvu|cbz|cbr|txt|rtf|docx?)$/i.test(f)))
                 .concat(files).sort((a, b) => fs.statSync(b).size - fs.statSync(a).size)[0];
         const ext = (pick.match(/\.([a-z0-9]{2,5})$/i) || [])[1] && !pick.endsWith('.part') ? pick.match(/\.([a-z0-9]{2,5})$/i)[1] : j.format || 'bin';
@@ -482,6 +492,39 @@ export async function fileIt(j, files, { copy = false, srcRoot = '' } = {}) {
     let size = 0;
     for (const p of placed) size += (await fsp.stat(p)).size;
     return finish(j, { path: mainPath, size, tracks: j.tracks || 1 });
+}
+
+// A torrent's whole folder, its layout untouched, under the folder the template names. Built under a temporary name
+// and renamed when complete, like an audiobook's tracks, so a copy cut short never passes for the download.
+async function fileFolder(j, files, srcRoot, copy) {
+    const dir = dirFor(j.kind);
+    const book = { author: j.author, title: j.title, year: j.year, series: j.series, narrator: j.narrator };
+    const dup = settings.shelves.duplicate;
+    const name = settings.shelves.rename ? folderPath(templateFor(j.kind), book, { tidy: settings.shelves.tidy }) : safeSegment(path.basename(srcRoot));
+    let folder = inside(dir, name || safeSegment(j.title) || j.id);
+    if (taken(folder)) {
+        if (dup === 'skip') return finish(j, null, 'Already on your shelf, so it was skipped', folder);
+        if (dup === 'both' || filing.has(folder)) folder = numberedPath(folder, taken);
+    }
+    // The format shown is the biggest file's (the film, the disc image, the book), not a sample or a cover.
+    const biggest = files.map(f => [f, fs.statSync(f).size]).sort((x, y) => y[1] - x[1])[0][0];
+    filing.add(folder);
+    const building = folder + '.incoming';
+    let size = 0;
+    try {
+        await fsp.rm(building, { recursive: true, force: true });
+        for (const f of files) {
+            // inside() keeps every file within the new folder, whatever the torrent called it.
+            await place(f, inside(building, path.relative(srcRoot, f)), copy);
+            size += (await fsp.stat(inside(building, path.relative(srcRoot, f)))).size;
+        }
+        if (exists(folder)) await fsp.rm(folder, { recursive: true, force: true }); // "Replace it"
+        await fsp.rename(building, folder);
+    } catch (e) { await fsp.rm(building, { recursive: true, force: true }); throw e; }
+    finally { filing.delete(folder); }
+    j.format = (path.extname(biggest).slice(1) || j.format || 'folder').toLowerCase();
+    j.tracks = files.length;
+    return finish(j, { path: folder, size, tracks: files.length });
 }
 
 // The result's cover next to an audiobook's tracks, for players that show folder art. At most 5 MB.
@@ -663,7 +706,7 @@ setTimeout(() => { checkMoved(); checkSpace(); tidy(); }, 2000).unref();
 
 // Sizes on the shelf per kind, for the Stats storage card.
 export function shelfBytes() {
-    const out = { ebook: 0, audiobook: 0, movie: 0 };
+    const out = Object.fromEntries(KINDS.map(k => [k, 0]));
     for (const i of shelf.items) if (!i.removedAt && !i.moved) out[i.kind] = (out[i.kind] || 0) + (i.size || 0);
     return out;
 }

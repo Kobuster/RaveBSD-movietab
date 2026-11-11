@@ -104,6 +104,20 @@ export function singleFileAudiobook(template, book) {
     return dir + '.' + String(book.ext || '').toLowerCase().replace(/^\./, '');
 }
 
+// The folder a torrent with several files is kept in: the template without its file name. The last segment goes
+// when it names tracks ({track}); otherwise only its extension does, and a last folder that repeats the one above
+// it is dropped. So eBooks give "Frank Herbert/Dune (1965)", audiobooks and music "Author/Title (Year)", and the
+// movie layout "{title} ({year})/{title} ({year}).{ext}" gives "Nosferatu (1922)".
+export function folderPath(template, book, opts) {
+    const segs = String(template || '{title}').split('/');
+    const last = segs[segs.length - 1];
+    if (segs.length > 1 && /\{track\}/.test(last)) segs.pop();
+    else segs[segs.length - 1] = last.replace(/\.\{ext\}\s*$/, '');
+    const filled = applyTemplate(segs.join('/'), { ...book, ext: '' }, opts).split('/').filter(Boolean);
+    if (filled.length > 1 && filled[filled.length - 1] === filled[filled.length - 2]) filled.pop();
+    return filled.join('/');
+}
+
 // "Keep both" naming: "Dune (1965).epub" -> "Dune (1965) (2).epub", counting up until exists() says no.
 export function numberedPath(p, exists) {
     if (!exists(p)) return p;

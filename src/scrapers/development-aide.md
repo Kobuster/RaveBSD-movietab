@@ -48,3 +48,20 @@ Their parsers have tests in `test/scrapers.test.mjs`, run by `npm test`.
 - Public, lawful sources. These files run inside the server with its permissions: only add code you trust.
 - Catch nothing you cannot handle: a thrown error is reported as that source failing, which is what the admin panel should show.
 - Keep requests few. `search()` should be one request; per-result lookups belong in `resolve()`, which only runs for results someone looks at.
+
+## qBittorrent search plugins
+
+A qBittorrent search plugin (`.py`) runs as it is: put the file in `scrapers/qbt/` next to compose.yaml (`SCRAPERS_DIR/qbt` in the container). No conversion. `src/qbtplugins.js` loads it, and the next search uses it.
+
+- **Tabs** come from the plugin's `supported_categories`, qBittorrent's fixed list: `books` feeds eBooks and audiobooks; `movies`, `tv`, `anime`, `music`, `games`, `software`, `pictures` feed the tab of that name. The table is `qbt` in `src/kinds.js`.
+- **General search**: a plugin that lists only `all` (or no categories) runs in every tab, asked for `all`, but only while *Include general torrent search* is on (admin panel, Libraries).
+- **Running**: each search starts `python3 src/nova/run.py search <plugin> <category> <words>`, with qBittorrent's own `novaprinter.py`, `helpers.py` and `socks.py` (from github.com/qbittorrent/search-plugins, `nova3/`) next to it. The query is URL-encoded, as `nova2.py` passes it. The process is stopped after 28 s; lines printed by then still count. Anything that is not a result line is ignored, and stderr shows up in the admin panel when the plugin fails outright.
+- **Results**: title and year are read from the release name (`parseRelease`), and the full name is kept as `release` and shown under the title. Seeds show as a chip. Different releases of the same title stay separate results.
+- **Links**: magnets are used as they are. `.torrent` links stay on the server (the page only gets a token, since private tracker links carry a passkey) and are fetched when the result is used, through the plugin's own `download_torrent()` when it has one. The file is kept in `data/torrents/` and uploaded to qBittorrent as a file, so private torrents (no DHT) still find their tracker. It is deleted once the download is filed.
+- **Trust**: a plugin runs with the server's permissions and its network, like a `.js` scraper. Only add plugins you trust.
+
+Run `node src/nova/run.py info scrapers/qbt/yourplugin.py` to see what RaveBSD reads from a plugin (name, url, categories).
+
+## Every tab, one table
+
+`src/kinds.js` lists the kinds (eBooks, audiobooks, movies, TV, anime, music, games, software, pictures): mode, folder, environment variable, naming template, qBittorrent category, colour, formats. Settings, folders, filing, the search dropdown, the shelf and stats all read it. A torrent with more than one file is always kept whole: the template names its folder (its last part, the file name, is left off) and every file inside stays as it came.

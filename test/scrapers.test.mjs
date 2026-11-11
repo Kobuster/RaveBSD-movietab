@@ -117,21 +117,35 @@ const { checkScraper, refreshScrapers, listScrapers, scraperProblems, getScraper
     assert.ok(!('fakefilms' in books.meta), 'movie scrapers stay out of book searches');
     console.log('movie search: ok');
 
-    // Filing: the biggest video of a torrent's files, by the movie template, in the movies folder.
-    const inc = path.join(root, 'incoming');
-    fs.mkdirSync(inc, { recursive: true });
-    const film = path.join(inc, 'Nosferatu.1922.mkv'), sample = path.join(inc, 'sample.mkv'), subs = path.join(inc, 'Nosferatu.srt'), art = path.join(inc, 'poster.jpg');
-    fs.writeFileSync(film, 'v'.repeat(5000)); fs.writeFileSync(sample, 'v'.repeat(300)); fs.writeFileSync(subs, 's'.repeat(9000)); fs.writeFileSync(art, 'i'.repeat(9000));
+    // Filing: a torrent with several files is kept whole, in the folder the movie template names.
+    const inc = path.join(root, 'incoming', 'Nosferatu.1922.1080p.BluRay');
+    fs.mkdirSync(path.join(inc, 'Subs'), { recursive: true });
+    const film = path.join(inc, 'Nosferatu.1922.mkv'), sample = path.join(inc, 'sample.mkv'), subs = path.join(inc, 'Subs', 'English.srt'), art = path.join(inc, 'poster.jpg');
+    fs.writeFileSync(film, 'v'.repeat(5000)); fs.writeFileSync(sample, 'v'.repeat(300)); fs.writeFileSync(subs, 's'.repeat(900)); fs.writeFileSync(art, 'i'.repeat(800));
     const job = { id: 'f1', kind: 'movie', title: 'Nosferatu', author: 'F. W. Murnau', year: '1922', format: '', how: 'qbit', owners: [] };
-    await jobs.fileIt(job, [subs, art, sample, film], { copy: true });
-    const placed = path.join(settings.shelves.movieDir, 'Nosferatu (1922)', 'Nosferatu (1922).mkv');
-    assert.ok(fs.existsSync(placed), 'the film is filed under the movies folder');
-    assert.equal(fs.statSync(placed).size, 5000, 'the biggest video, not the subtitles or artwork');
+    await jobs.fileIt(job, [subs, art, sample, film], { copy: true, srcRoot: inc });
+    const folder = path.join(settings.shelves.movieDir, 'Nosferatu (1922)');
+    assert.ok(fs.statSync(folder).isDirectory(), 'the torrent is filed as a folder under the movies folder');
+    assert.deepEqual(fs.readdirSync(folder).sort(), ['Nosferatu.1922.mkv', 'Subs', 'poster.jpg', 'sample.mkv'], 'every file kept, as it came');
+    assert.equal(fs.readFileSync(path.join(folder, 'Subs', 'English.srt'), 'utf8').length, 900, 'subfolders too');
+    assert.ok(!fs.existsSync(folder + '.incoming'), 'no temporary folder left behind');
     const item = jobs.listShelf({ role: 'admin' }).find(i => i.kind === 'movie');
-    assert.ok(item && jobs.fileFor(item), 'it is on the shelf and can be saved to a device');
-    assert.equal(jobs.shelfBytes().movie, 5000);
+    assert.equal(item.format, 'mkv', 'the format shown is the biggest file\'s');
+    assert.equal(item.tracks, 4);
+    assert.ok(item && jobs.fileFor(item) && jobs.fileFor(item).isDir, 'it is on the shelf and saves as a folder (a zip)');
+    assert.equal(jobs.shelfBytes().movie, 7000);
+    // The same torrent again, with "skip": nothing is replaced.
+    await jobs.fileIt({ ...job, id: 'f2' }, [subs, art, sample, film], { copy: true, srcRoot: inc });
+    assert.equal(jobs.listShelf({ role: 'admin' }).filter(i => i.kind === 'movie').length, 1, 'already on the shelf: skipped');
+    // A game, the same way, in its own folder.
+    const g = path.join(root, 'incoming', 'Beneath.a.Steel.Sky.GOG');
+    fs.mkdirSync(g, { recursive: true });
+    fs.writeFileSync(path.join(g, 'setup.exe'), 'x'.repeat(100)); fs.writeFileSync(path.join(g, 'data.bin'), 'x'.repeat(400));
+    await jobs.fileIt({ id: 'g1', kind: 'game', title: 'Beneath a Steel Sky', author: '', year: '1994', format: '', how: 'qbit', owners: [] }, [path.join(g, 'setup.exe'), path.join(g, 'data.bin')], { copy: true, srcRoot: g });
+    assert.deepEqual(fs.readdirSync(path.join(settings.shelves.gameDir, 'Beneath a Steel Sky (1994)')).sort(), ['data.bin', 'setup.exe'], 'a game keeps all its files');
+    assert.equal(jobs.shelfBytes().game, 500);
     await jobs.deleteItems([item.id], { role: 'admin' });
-    assert.ok(!fs.existsSync(path.dirname(placed)), 'deleting it removes the empty film folder too');
+    assert.ok(!fs.existsSync(folder), 'deleting it removes the film folder');
     console.log('filing a movie: ok');
 
     const { countDownload, statsFor } = await import('../src/config.js');

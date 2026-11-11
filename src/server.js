@@ -20,7 +20,7 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { pipeline } from 'node:stream';
 import core, { setUserAgentMode, setCreds, annasStatus, annasVerifyUrl, annasPageState, annasRecheck, zlibStatus, zlibVerifyUrl, zlibPageState, zlibRecheck, mobilismStatus,
-    setResultDecorator, setSourcesOff, setSearchGate, sourceHealth, getResult, currentUA } from './sources.js';
+    setResultDecorator, setSourcesOff, setGeneralSearch, setSearchGate, sourceHealth, getResult, currentUA } from './sources.js';
 import { setProfileDir, ensureBrowser, browserAvailable, restartBrowser, startVerification, verificationFrame, verificationHtml, verificationInput, stopVerification, reloadVerification, browserSandboxed } from './browser.js';
 import { DATA, settings, saveSettings, patchSettings, publicSettings, isPublic, publicForced, accessMode, statsFor, clearStats, stats, restoreStats } from './config.js';
 import * as auth from './auth.js';
@@ -31,9 +31,11 @@ import { zipFolder, zipSize } from './zip.js';
 import { refreshSlum, slumSummary } from './slum.js';
 import { fetchPublic, readCapped } from './netguard.js';
 import { refreshScrapers, listScrapers, scraperProblems, USER_DIR as SCRAPERS_DIR } from './scrapers.js';
+import { KIND_LIST } from './kinds.js';
 
 const ROOT = path.join(path.dirname(fileURLToPath(import.meta.url)), '..', 'public');
 const RENAME_JS = path.join(path.dirname(fileURLToPath(import.meta.url)), 'rename.js');
+const KINDS_JS = path.join(path.dirname(fileURLToPath(import.meta.url)), 'kinds.js');
 const PORT = Number(process.env.PORT) || 8080;
 
 let VERSION = '';
@@ -60,6 +62,7 @@ function applyCreds() {
 function applySettings() {
     setUserAgentMode(settings.userAgentMode);
     setSourcesOff(settings.sources.off);
+    setGeneralSearch(settings.sources.general);
     applyCreds();
 }
 applySettings();
@@ -154,6 +157,7 @@ const API_CORS = { 'Access-Control-Allow-Origin': '*', 'Access-Control-Allow-Hea
 
 function serveStatic(urlPath, res, req) {
     if (urlPath === '/js/rename.js') return sendFile(RENAME_JS, res, req);
+    if (urlPath === '/js/kinds.js') return sendFile(KINDS_JS, res, req);
     let rel = decodeURIComponent(urlPath).replace(/^\/+/, '');
     // Page routes (/shelf, /settings, ...) all load the one page; it reads the address itself.
     if (!rel || !path.extname(rel)) rel = 'index.html';
@@ -246,24 +250,26 @@ function viewSettings(me) {
     const all = publicSettings();
     // Setup only needs the folders, templates and qBittorrent's address.
     if (!settings.setupDone) {
-        const { ebookDir, audioDir, movieDir, ebookTemplate, audioTemplate, movieTemplate } = all.shelves;
-        return { access: { mode: all.access.mode, publicForced: all.access.publicForced }, shelves: { ebookDir, audioDir, movieDir, ebookTemplate, audioTemplate, movieTemplate }, qbit: { url: all.qbit.url } };
+        return { access: { mode: all.access.mode, publicForced: all.access.publicForced }, shelves: pick(all.shelves, [...DIR_KEYS, ...TPL_KEYS]), qbit: { url: all.qbit.url } };
     }
     if (me.role === 'admin') return all;
-    const { ebookTemplate, audioTemplate, movieTemplate, rename, tidy } = all.shelves;
     return {
         access: { mode: all.access.mode }, searching: all.searching, saving: all.saving, notify: all.notify, justLinks: all.justLinks,
         visitors: all.visitors, qbit: { enabled: all.qbit.enabled, directSlots: all.qbit.directSlots }, sources: { slum: all.sources.slum },
         system: { badges: all.system.badges }, vpn: { enabled: all.vpn.enabled, tellOnDrop: all.vpn.tellOnDrop }, storage: { lowSpaceGB: all.storage.lowSpaceGB },
-        shelves: { ebookTemplate, audioTemplate, movieTemplate, rename, tidy },
+        shelves: pick(all.shelves, [...TPL_KEYS, 'rename', 'tidy']),
     };
 }
+const DIR_KEYS = KIND_LIST.map(k => k.dirKey), TPL_KEYS = KIND_LIST.map(k => k.tplKey);
+const pick = (o, keys) => Object.fromEntries(keys.filter(k => k in o).map(k => [k, o[k]]));
+// Free space on each kind's folder, keyed by kind.
+const spaceByKind = async () => Object.fromEntries(await Promise.all(KIND_LIST.map(async k => [k.kind, await jobs.freeSpace(path.resolve(settings.shelves[k.dirKey]))])));
 // A shelf item as a non-admin sees it: its place inside the shelf, not on the disk.
 function viewItem(i, me) {
     const { owners, fp, ...rest } = i;
     const out = { ...rest };
     if (me.role !== 'admin') {
-        const root = path.resolve(i.kind === 'audiobook' ? settings.shelves.audioDir : i.kind === 'movie' ? settings.shelves.movieDir : settings.shelves.ebookDir);
+        const root = jobs.dirFor(i.kind);
         out.path = path.relative(root, path.resolve(i.path));
         // Family users see who added a book; visitors never see account names.
         if (out.addedBy) out.addedBy = me.role === 'visitor' ? { type: out.addedBy.type } : { type: out.addedBy.type, name: out.addedBy.name || '' };
@@ -357,7 +363,7 @@ async function api(req, res, url, me) {
     if (p === '/api/folders' && m === 'POST') {
         const b = await json(req);
         const out = {};
-        for (const k of ['ebookDir', 'audioDir', 'movieDir']) out[k] = await jobs.freeSpace(path.resolve(String(b[k] || settings.shelves[k])));
+        for (const k of DIR_KEYS) out[k] = await jobs.freeSpace(path.resolve(String(b[k] || settings.shelves[k])));
         return send(res, 200, out);
     }
 
@@ -392,8 +398,7 @@ async function api(req, res, url, me) {
         });
         // Visitors see their own room; everyone else the disk's.
         if (me.role === 'visitor') return send(res, 200, { items, jobs: jobs.listJobs(me), mine: { used: jobs.visitorUsage(me.vid), quota: settings.visitors.quotaMB * 1e6, keepDays: settings.visitors.keepDays } });
-        const [e, a, v] = await Promise.all([settings.shelves.ebookDir, settings.shelves.audioDir, settings.shelves.movieDir].map(d => jobs.freeSpace(path.resolve(d))));
-        return send(res, 200, { items, jobs: jobs.listJobs(me), space: { ebook: e, audiobook: a, movie: v }, lowSpace: me.role === 'admin' && jobs.lowSpace });
+        return send(res, 200, { items, jobs: jobs.listJobs(me), space: await spaceByKind(), lowSpace: me.role === 'admin' && jobs.lowSpace });
     }
     if (p === '/api/shelf/delete' && m === 'POST') { const b = await json(req); return send(res, 200, { deleted: await jobs.deleteItems((b.ids || []).map(String), me) }); }
     if ((mm = p.match(/^\/api\/shelf\/([a-f0-9]+)\/forget$/)) && m === 'POST') { jobs.forget(mm[1], me); return send(res, 200, { ok: true }); }
@@ -401,10 +406,10 @@ async function api(req, res, url, me) {
     if (p === '/api/stats') {
         if (m === 'DELETE') { clearStats(); return send(res, 200, { ok: true }); }
         const period = ['all', 'year', '30d'].includes(url.searchParams.get('period')) ? url.searchParams.get('period') : 'all';
-        const [e, a, v] = await Promise.all([settings.shelves.ebookDir, settings.shelves.audioDir, settings.shelves.movieDir].map(d => jobs.freeSpace(path.resolve(d))));
-        // The biggest of the disks the shelves are on (usually all three are the same one).
-        const disk = [e, a, v].sort((x, y) => (y.total || 0) - (x.total || 0))[0];
-        return send(res, 200, { enabled: settings.statsEnabled, period, ...statsFor(period), shelf: jobs.shelfBytes(), disk, sameDisk: [a, v].every(d => d.total === e.total && Math.abs(d.free - e.free) < 1e9) });
+        const all = Object.values(await spaceByKind());
+        // The biggest of the disks the shelves are on (usually they all share one).
+        const disk = [...all].sort((x, y) => (y.total || 0) - (x.total || 0))[0];
+        return send(res, 200, { enabled: settings.statsEnabled, period, ...statsFor(period), shelf: jobs.shelfBytes(), disk, sameDisk: all.every(d => d.total === all[0].total && Math.abs(d.free - all[0].free) < 1e9) });
     }
 
     if (p === '/api/backup' && m === 'GET') {

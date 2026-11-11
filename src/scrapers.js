@@ -9,10 +9,12 @@
 // in the admin panel under Libraries; the other sources carry on.
 //
 // What a scraper file exports is described in src/scrapers/development-aide.md and src/scrapers/_template.js.
+// qBittorrent search plugins (.py) go in the qbt subfolder of SCRAPERS_DIR instead; see src/qbtplugins.js.
 import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { MODES } from './kinds.js';
+import { loadPlugins } from './qbtplugins.js';
 
 const BUILT_IN = path.join(path.dirname(fileURLToPath(import.meta.url)), 'scrapers');
 export const USER_DIR = path.resolve(process.env.SCRAPERS_DIR || path.join(process.cwd(), 'scrapers'));
@@ -85,14 +87,22 @@ export function refreshScrapers(force = false) {
             next.set(e.def.id, e.def);
         }
         for (const f of [...loaded.keys()]) if (!files.some(([x]) => x === f)) loaded.delete(f);
+        // qBittorrent search plugins in the qbt subfolder (src/qbtplugins.js). Their ids start with "qbt".
+        const plugins = await loadPlugins(path.join(USER_DIR, 'qbt'));
+        for (const d of plugins.defs) {
+            if (next.has(d.id)) { errs.push({ file: d.file, from: 'yours', error: `id "${d.id}" is already used by ${next.get(d.id).file}` }); continue; }
+            next.set(d.id, d);
+        }
+        errs.push(...plugins.problems);
         active = next; problems = errs; lastScan = Date.now();
     })().finally(() => { scanning = null; });
     return scanning;
 }
 
-export const scrapersFor = mode => [...active.values()].filter(s => s.kinds.includes(mode));
+// general: whether "Include general torrent search" is on (qBittorrent plugins that only list "all").
+export const scrapersFor = (mode, { general = false } = {}) => [...active.values()].filter(s => s.kinds.includes(mode) && (!s.general || general));
 export const getScraper = id => active.get(id) || null;
 export const scraperByName = name => [...active.values()].find(s => s.name === name) || null;
 // For the admin panel: what is loaded and what was skipped.
-export const listScrapers = () => [...active.values()].map(({ id, name, kinds, about, colour, file, from }) => ({ id, name, kinds, about, colour, file, from }));
+export const listScrapers = () => [...active.values()].map(({ id, name, kinds, about, colour, file, from, general, qbt }) => ({ id, name, kinds, about, colour, file, from, general: !!general, qbt: !!qbt }));
 export const scraperProblems = () => problems.slice();

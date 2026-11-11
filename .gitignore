@@ -7,3 +7,12 @@ audiobooks/
 movies/
 downloads/
 qbittorrent/
+# The folders of a local install (anchored: src/scrapers/ is part of the app).
+/tv/
+/anime/
+/music/
+/games/
+/software/
+/pictures/
+/scrapers/
+__pycache__/

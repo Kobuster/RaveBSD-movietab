@@ -22,17 +22,18 @@ async function login(q = settings.qbit) {
     sid = m ? m[1] + '=' + m[2] : ''; sidFor = url;
 }
 
-async function call(p, { form, method = form ? 'POST' : 'GET' } = {}, retry = true, q = settings.qbit) {
+// form: url-encoded fields; multipart: a FormData (fetch writes its own Content-Type with the boundary).
+async function call(p, { form, multipart, method = form || multipart ? 'POST' : 'GET' } = {}, retry = true, q = settings.qbit) {
     const url = base(q);
     if (!url) throw new Error('No qBittorrent address set');
     if (sidFor !== url) await login(q);
     const res = await fetch(url + p, {
         method,
         headers: { Referer: url, Origin: url, ...(sid ? { Cookie: sid } : {}), ...(form ? { 'Content-Type': 'application/x-www-form-urlencoded' } : {}) },
-        body: form ? new URLSearchParams(form) : undefined,
+        body: form ? new URLSearchParams(form) : multipart || undefined,
         signal: AbortSignal.timeout(10000),
     });
-    if (res.status === 403 && retry) { sidFor = ''; await login(q); return call(p, { form, method }, false, q); }
+    if (res.status === 403 && retry) { sidFor = ''; await login(q); return call(p, { form, multipart, method }, false, q); }
     if (!res.ok) throw new Error('qBittorrent answered ' + res.status);
     const t = await res.text();
     try { return JSON.parse(t); } catch (e) { return t; }
@@ -58,6 +59,19 @@ export async function addMagnet(magnet) {
     try { r = await call('/api/v2/torrents/add', { form: { urls: magnet, category } }); }
     catch (e) { if (/ 409$/.test(e.message)) return; throw e; }
     if (typeof r === 'string' && /fail/i.test(r)) throw new Error('qBittorrent did not accept the magnet');
+}
+
+// A .torrent file itself (private torrents: their tracker address is only in the file).
+export async function addTorrentFile(buf, name = 'download.torrent') {
+    const category = settings.qbit.category || 'ravebsd';
+    await call('/api/v2/torrents/createCategory', { form: { category, savePath: '' } }).catch(() => {});
+    const fd = new FormData();
+    fd.append('torrents', new Blob([buf], { type: 'application/x-bittorrent' }), name);
+    fd.append('category', category);
+    let r;
+    try { r = await call('/api/v2/torrents/add', { multipart: fd }); }
+    catch (e) { if (/ 409$/.test(e.message)) return; throw e; }
+    if (typeof r === 'string' && /fail/i.test(r)) throw new Error('qBittorrent did not accept the .torrent file');
 }
 
 export async function torrentInfo(hash) {
